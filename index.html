@@ -1,0 +1,916 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CampusLink - Réseau étudiant et professionnel</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        .spinner { width: 28px; height: 28px; border: 3px solid #e0e7ff; border-top-color: #4f46e5; border-radius: 50%; animation: spin .8s linear infinite; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .field { width: 100%; padding: .7rem .9rem; border: 1px solid #d1d5db; border-radius: .75rem; outline: none; background: #fff; font-size: .9rem; }
+        .field:focus { box-shadow: 0 0 0 2px #6366f1; border-color: #6366f1; }
+        .btn { display: inline-flex; align-items: center; justify-content: center; gap: .4rem; font-weight: 600; font-size: .85rem; padding: .55rem 1rem; border-radius: .75rem; transition: background .15s; cursor: pointer; }
+        .btn:disabled { opacity: .55; cursor: not-allowed; }
+        .btn-primary { background: #4f46e5; color: #fff; } .btn-primary:hover:not(:disabled) { background: #4338ca; }
+        .btn-green { background: #16a34a; color: #fff; } .btn-green:hover:not(:disabled) { background: #15803d; }
+        .btn-red { background: #ef4444; color: #fff; } .btn-red:hover:not(:disabled) { background: #dc2626; }
+        .btn-ghost { background: #f3f4f6; color: #374151; } .btn-ghost:hover:not(:disabled) { background: #e5e7eb; }
+        .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 1rem; box-shadow: 0 1px 2px rgba(0,0,0,.04); }
+        .chip { font-size: .68rem; font-weight: 700; padding: .1rem .55rem; border-radius: 999px; text-transform: uppercase; letter-spacing: .02em; }
+        .auth-bg { background: linear-gradient(135deg, #4338ca 0%, #4f46e5 45%, #6366f1 100%); }
+    </style>
+</head>
+<body class="bg-gray-100 text-gray-800 font-sans min-h-screen">
+    <div id="toasts" class="fixed top-4 right-4 z-[100] space-y-2 w-[min(92vw,22rem)]" aria-live="polite"></div>
+    <header id="nav"></header>
+    <main id="view"></main>
+    <nav id="bottom-nav"></nav>
+
+<script>
+"use strict";
+const API = "./api.php";
+const state = { user: null, csrf: "", unread: 0, mailMode: "log", v: Date.now() };
+
+// ------------------------------------------------------------------ utilitaires
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const ROLE = { student: "Étudiant", company: "Entreprise", admin: "Admin", moderator: "Modérateur" };
+const VERIF = { pending: "En attente de vérification", verified: "Vérifiée", rejected: "Refusée" };
+
+function fmtDate(s) {
+    if (!s) return "";
+    const d = new Date(String(s).replace(" ", "T"));
+    return isNaN(d) ? esc(s) : d.toLocaleString("fr-FR", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+function toast(msg, type = "success") {
+    const el = document.createElement("div");
+    const colors = type === "success" ? "bg-green-600" : type === "info" ? "bg-indigo-600" : "bg-red-600";
+    el.className = `${colors} text-white text-sm px-4 py-3 rounded-xl shadow-lg`;
+    el.setAttribute("role", type === "error" ? "alert" : "status");
+    el.textContent = msg;
+    $("#toasts").appendChild(el);
+    setTimeout(() => el.remove(), type === "error" ? 6000 : 3500);
+}
+
+async function api(action, { method = "GET", body, form, params = {} } = {}, retry = true) {
+    const qs = new URLSearchParams({ action, ...params });
+    const opts = { method, credentials: "same-origin", headers: {} };
+    if (method === "POST") {
+        opts.headers["X-CSRF-Token"] = state.csrf;
+        if (form) opts.body = form;
+        else { opts.headers["Content-Type"] = "application/json"; opts.body = JSON.stringify(body || {}); }
+    }
+    let res, data;
+    try {
+        res = await fetch(`${API}?${qs}`, opts);
+        data = await res.json();
+    } catch (e) {
+        return { success: false, message: "Erreur de connexion au serveur.", status: 0 };
+    }
+    data.status = res.status;
+    if (res.status === 403 && data.code === "csrf" && retry) {
+        await loadMe();
+        return api(action, { method, body, form, params }, false);
+    }
+    if (res.status === 401 && data.code === "auth" && state.user) {
+        state.user = null; renderNav();
+        location.hash = "#/login";
+        toast("Votre session a expiré. Reconnectez-vous.", "error");
+    }
+    return data;
+}
+
+async function loadMe() {
+    const d = await api("me");
+    if (d.success) { state.csrf = d.csrf; state.user = d.user; state.unread = d.unread || 0; state.mailMode = d.mail_mode; }
+    return d;
+}
+
+function setBusy(btn, busy, label) {
+    if (!btn) return;
+    if (busy) { btn.dataset.label = btn.innerHTML; btn.disabled = true; btn.innerHTML = `<i class="fa-solid fa-circle-notch fa-spin"></i> ${label || "Veuillez patienter…"}`; }
+    else { btn.disabled = false; if (btn.dataset.label) btn.innerHTML = btn.dataset.label; }
+}
+
+const spinner = (txt = "Chargement…") => `<div class="flex flex-col items-center gap-3 py-16 text-gray-500 text-sm"><div class="spinner"></div>${esc(txt)}</div>`;
+const fileUrl = (kind, id) => `${API}?action=file&kind=${kind}&id=${encodeURIComponent(id)}&v=${state.v}`;
+const errBox = (id) => `<div id="${id}" class="hidden mb-4 p-3 bg-red-50 border border-red-200 text-red-700 text-sm rounded-xl" role="alert"></div>`;
+function showErr(id, msg) { const b = document.getElementById(id); if (!b) return; b.textContent = msg; b.classList.remove("hidden"); }
+function hideErr(id) { const b = document.getElementById(id); if (b) b.classList.add("hidden"); }
+
+function avatar(id, name, has, size = "md") {
+    const sz = { sm: "w-8 h-8 text-xs", md: "w-11 h-11 text-sm", lg: "w-24 h-24 text-3xl" }[size];
+    if (has) return `<img src="${fileUrl("avatar", id)}" alt="Photo de ${esc(name)}" class="${sz} rounded-full object-cover shrink-0 border bg-gray-100">`;
+    const ini = esc((String(name || "?").trim().split(/\s+/).map(w => w[0]).slice(0, 2).join("") || "?").toUpperCase());
+    return `<div class="${sz} rounded-full shrink-0 bg-indigo-100 text-indigo-700 font-bold flex items-center justify-center" aria-hidden="true">${ini}</div>`;
+}
+const verifiedBadge = () => `<span class="chip bg-emerald-100 text-emerald-700" title="Entreprise vérifiée par CampusLink"><i class="fa-solid fa-circle-check"></i> Vérifiée</span>`;
+const roleChip = r => `<span class="chip bg-indigo-50 text-indigo-700">${esc(ROLE[r] || r)}</span>`;
+
+// champ mot de passe avec icône œil
+function pwField(id, label, autocomplete = "current-password", hint = "") {
+    return `<div>
+        <label for="${id}" class="block text-sm font-medium text-gray-700 mb-1">${esc(label)}</label>
+        <div class="relative">
+            <input type="password" id="${id}" name="${id}" required autocomplete="${autocomplete}" class="field pr-11">
+            <button type="button" data-toggle-pw="${id}" class="absolute inset-y-0 right-0 px-3 text-gray-400 hover:text-indigo-600" aria-label="Afficher ou masquer le mot de passe" title="Afficher / masquer"><i class="fa-solid fa-eye"></i></button>
+        </div>${hint ? `<p class="text-xs text-gray-500 mt-1">${hint}</p>` : ""}
+    </div>`;
+}
+const PW_HINT = "8 caractères minimum, avec une majuscule, une minuscule et un chiffre.";
+function pwError(p) {
+    if (p.length < 8) return "Le mot de passe doit contenir au moins 8 caractères.";
+    if (!/[a-z]/.test(p) || !/[A-Z]/.test(p) || !/\d/.test(p)) return "Le mot de passe doit contenir une minuscule, une majuscule et un chiffre.";
+    return null;
+}
+
+// ------------------------------------------------------------------ navigation / layout
+const NAV = [
+    ["feed", "fa-house", "Accueil"], ["people", "fa-user-group", "Réseau"], ["invitations", "fa-envelope-open-text", "Invitations"],
+    ["jobs", "fa-briefcase", "Offres"], ["market", "fa-store", "Marketplace"],
+];
+
+function renderNav() {
+    const nav = $("#nav"), bottom = $("#bottom-nav"), u = state.user;
+    document.body.classList.toggle("pb-16", !!u);
+    if (!u) { nav.innerHTML = ""; bottom.innerHTML = ""; return; }   // pas de header sur connexion / inscription
+    const cur = currentRoute().name;
+    const isAdmin = u.role === "admin";
+    const link = ([r, ic, t]) => `<a href="#/${r}" class="px-3 py-2 rounded-lg text-sm hover:bg-indigo-700 ${cur === r ? "bg-indigo-700" : ""}"><i class="fa-solid ${ic} mr-1"></i>${t}</a>`;
+    nav.innerHTML = `<div class="bg-indigo-600 text-white shadow-md sticky top-0 z-50"><div class="max-w-6xl mx-auto px-4 flex justify-between items-center h-16">
+        <a href="#/${isAdmin ? "admin" : "feed"}" class="font-bold text-xl sm:text-2xl flex items-center gap-2"><i class="fa-solid fa-graduation-cap text-amber-400"></i> CampusLink</a>
+        <div class="hidden md:flex items-center gap-1 font-medium">${NAV.map(link).join("")}${isAdmin ? link(["admin", "fa-shield-halved", "Admin"]) : ""}</div>
+        <div class="flex items-center gap-2">
+            <a href="#/notifications" class="relative px-3 py-2 rounded-lg hover:bg-indigo-700" aria-label="Notifications"><i class="fa-solid fa-bell"></i>
+                <span id="notif-badge" class="${state.unread ? "" : "hidden"} absolute -top-0.5 right-0 bg-amber-400 text-indigo-900 text-[10px] font-bold rounded-full min-w-[18px] h-[18px] flex items-center justify-center px-1">${state.unread > 99 ? "99+" : state.unread}</span></a>
+            <div class="relative">
+                <button data-act="toggle-menu" class="flex items-center gap-2 rounded-full hover:bg-indigo-700 p-1 pr-3" aria-haspopup="true" aria-label="Menu du compte">${avatar(u.id, u.name, u.has_avatar, "sm")}<i class="fa-solid fa-chevron-down text-xs hidden sm:inline"></i></button>
+                <div id="user-menu" class="hidden absolute right-0 mt-2 w-56 bg-white text-gray-700 rounded-xl shadow-lg border overflow-hidden text-sm">
+                    <div class="px-4 py-3 border-b"><p class="font-semibold truncate">${esc(u.name)}</p><p class="text-xs text-gray-500 truncate">${esc(u.email)}</p></div>
+                    <a href="#/profile" class="block px-4 py-2.5 hover:bg-gray-50"><i class="fa-solid fa-user w-5"></i> Mon profil</a>
+                    <a href="#/profile/edit" class="block px-4 py-2.5 hover:bg-gray-50"><i class="fa-solid fa-pen w-5"></i> Modifier mon profil</a>
+                    <a href="#/security" class="block px-4 py-2.5 hover:bg-gray-50"><i class="fa-solid fa-lock w-5"></i> Sécurité</a>
+                    <button data-act="logout" class="w-full text-left px-4 py-2.5 hover:bg-red-50 text-red-600"><i class="fa-solid fa-right-from-bracket w-5"></i> Déconnexion</button>
+                </div></div>
+        </div></div></div>`;
+    const bItem = ([r, ic, t]) => `<a href="#/${r}" class="flex flex-col items-center justify-center flex-1 py-2 text-[11px] ${cur === r ? "text-indigo-600 font-semibold" : "text-gray-500"}"><i class="fa-solid ${ic} text-lg"></i>${t}</a>`;
+    bottom.innerHTML = `<div class="md:hidden fixed bottom-0 inset-x-0 bg-white border-t z-40 flex">${[NAV[0], NAV[1], NAV[2], NAV[3], ["profile", "fa-user", "Profil"]].map(bItem).join("")}</div>`;
+}
+
+function updateBadge() {
+    const b = $("#notif-badge");
+    if (!b) return;
+    b.textContent = state.unread > 99 ? "99+" : state.unread;
+    b.classList.toggle("hidden", !state.unread);
+}
+
+function currentRoute() {
+    const raw = location.hash.replace(/^#\/?/, "");
+    const [path, qs] = raw.split("?");
+    const parts = path.split("/").filter(Boolean);
+    return { name: parts[0] || "", sub: parts[1] || "", params: new URLSearchParams(qs || "") };
+}
+
+function authShell(inner) {
+    return `<div class="min-h-screen grid lg:grid-cols-2">
+        <div class="hidden lg:flex auth-bg text-white p-12 flex-col justify-between">
+            <div class="text-2xl font-bold flex items-center gap-2"><i class="fa-solid fa-graduation-cap text-amber-400"></i> CampusLink</div>
+            <div class="space-y-6 max-w-md">
+                <h1 class="text-4xl font-bold leading-tight">Le réseau où les étudiants et les entreprises se rencontrent.</h1>
+                <ul class="space-y-3 text-indigo-100">
+                    <li><i class="fa-solid fa-circle-check text-amber-400 mr-2"></i>Créez votre profil et partagez vos actualités</li>
+                    <li><i class="fa-solid fa-circle-check text-amber-400 mr-2"></i>Connectez-vous avec des étudiants et des entreprises vérifiées</li>
+                    <li><i class="fa-solid fa-circle-check text-amber-400 mr-2"></i>Trouvez stages, alternances et emplois</li>
+                </ul>
+            </div>
+            <p class="text-sm text-indigo-200">© CampusLink</p>
+        </div>
+        <div class="flex items-center justify-center p-5 sm:p-10">
+            <div class="w-full max-w-md">
+                <div class="lg:hidden text-center mb-6 text-2xl font-bold text-indigo-600"><i class="fa-solid fa-graduation-cap text-amber-500"></i> CampusLink</div>
+                <div class="card p-6 sm:p-8">${inner}</div>
+            </div>
+        </div></div>`;
+}
+
+// ------------------------------------------------------------------ routeur
+const PUBLIC = ["login", "register", "verify", "check-email"];
+
+async function route() {
+    const r = currentRoute();
+    const view = $("#view");
+    if (state.user && PUBLIC.includes(r.name) && r.name !== "verify") { location.hash = state.user.role === "admin" ? "#/admin" : "#/feed"; return; }
+    if (!state.user && !PUBLIC.includes(r.name)) { location.hash = "#/login"; return; }
+    if (!r.name) { location.hash = state.user ? "#/feed" : "#/login"; return; }
+    renderNav();
+    window.scrollTo(0, 0);
+    view.className = PUBLIC.includes(r.name) ? "" : "max-w-5xl mx-auto w-full p-4";
+    view.innerHTML = spinner();
+    const views = {
+        login: vLogin, register: vRegister, verify: vVerify, "check-email": vCheckEmail,
+        feed: vFeed, people: vPeople, invitations: vInvitations, notifications: vNotifications, profile: vProfile,
+        security: vSecurity, jobs: vJobs, market: vMarket, admin: vAdmin,
+    };
+    const fn = views[r.name];
+    if (!fn) { view.innerHTML = `<div class="card p-8 text-center">Page introuvable. <a class="text-indigo-600 font-semibold" href="#/feed">Retour</a></div>`; return; }
+    try { await fn(r); } catch (e) { console.error(e); view.innerHTML = `<div class="card p-8 text-center text-red-600">Une erreur est survenue. Rechargez la page.</div>`; }
+}
+
+// ------------------------------------------------------------------ connexion
+async function vLogin(r) {
+    const flash = sessionStorage.getItem("flash"); sessionStorage.removeItem("flash");
+    $("#view").innerHTML = authShell(`
+        <h2 class="text-2xl font-bold text-gray-900 mb-1">Connexion</h2>
+        <p class="text-sm text-gray-500 mb-5">Content de vous revoir !</p>
+        ${flash ? `<div class="mb-4 p-3 bg-green-50 border border-green-200 text-green-700 text-sm rounded-xl">${esc(flash)}</div>` : ""}
+        ${errBox("login-error")}
+        <div id="resend-box" class="hidden mb-4 p-3 bg-amber-50 border border-amber-200 text-amber-800 text-sm rounded-xl">
+            Votre adresse n'est pas confirmée. <button type="button" class="font-semibold underline" data-act="resend">Renvoyer l'e-mail de confirmation</button></div>
+        <form data-form="login" class="space-y-4" novalidate>
+            <div><label for="login-email" class="block text-sm font-medium text-gray-700 mb-1">Adresse e-mail</label>
+                <input type="email" id="login-email" required autocomplete="email" class="field" placeholder="vous@exemple.com"></div>
+            ${pwField("login-password", "Mot de passe")}
+            <button class="btn btn-primary w-full py-3" type="submit">Se connecter</button>
+        </form>
+        <p class="text-sm text-center mt-5 text-gray-600">Pas encore de compte ? <a href="#/register" class="text-indigo-600 font-bold hover:underline">Créer un compte</a></p>`);
+}
+
+async function onLogin(form) {
+    hideErr("login-error"); $("#resend-box").classList.add("hidden");
+    const email = $("#login-email").value.trim(), password = $("#login-password").value;
+    if (!email || !password) return showErr("login-error", "Saisissez votre e-mail et votre mot de passe.");
+    const btn = $("button[type=submit]", form); setBusy(btn, true, "Connexion…");
+    const d = await api("login", { method: "POST", body: { email, password } });
+    setBusy(btn, false);
+    if (!d.success) {
+        showErr("login-error", d.message);
+        if (d.code === "email_not_verified") { $("#resend-box").classList.remove("hidden"); $("#resend-box").dataset.email = d.email || email; }
+        return;
+    }
+    state.csrf = d.csrf; state.user = d.user; state.unread = d.unread || 0; state.v = Date.now();
+    location.hash = "#/" + (d.redirect || "feed");
+}
+
+async function onResend(el) {
+    const email = (el.closest("[data-email]")?.dataset.email) || $("#login-email")?.value || sessionStorage.getItem("pending-email") || "";
+    setBusy(el, true, "Envoi…");
+    const d = await api("resend_verification", { method: "POST", body: { email } });
+    setBusy(el, false);
+    toast(d.message || "Erreur", d.success ? "success" : "error");
+}
+
+// ------------------------------------------------------------------ inscription
+async function vRegister() {
+    $("#view").innerHTML = authShell(`
+        <h2 class="text-2xl font-bold text-gray-900 mb-1">Créer un compte</h2>
+        <p class="text-sm text-gray-500 mb-5">Rejoignez CampusLink en quelques secondes.</p>
+        ${errBox("register-error")}
+        <form data-form="register" class="space-y-4" novalidate>
+            <fieldset><legend class="block text-sm font-medium text-gray-700 mb-2">Type de compte</legend>
+                <div class="grid grid-cols-2 gap-3">
+                    <label class="cursor-pointer"><input type="radio" name="role" value="student" class="peer sr-only" checked>
+                        <div class="border rounded-xl p-3 text-center text-sm peer-checked:border-indigo-600 peer-checked:bg-indigo-50 peer-checked:text-indigo-700 peer-focus-visible:ring-2 ring-indigo-400"><i class="fa-solid fa-user-graduate block text-lg mb-1"></i>Étudiant</div></label>
+                    <label class="cursor-pointer"><input type="radio" name="role" value="company" class="peer sr-only">
+                        <div class="border rounded-xl p-3 text-center text-sm peer-checked:border-indigo-600 peer-checked:bg-indigo-50 peer-checked:text-indigo-700 peer-focus-visible:ring-2 ring-indigo-400"><i class="fa-solid fa-building block text-lg mb-1"></i>Entreprise</div></label>
+                </div></fieldset>
+            <div id="reg-student" class="grid grid-cols-2 gap-3">
+                <div><label for="reg-first" class="block text-sm font-medium text-gray-700 mb-1">Prénom</label><input id="reg-first" class="field" autocomplete="given-name"></div>
+                <div><label for="reg-last" class="block text-sm font-medium text-gray-700 mb-1">Nom</label><input id="reg-last" class="field" autocomplete="family-name"></div>
+            </div>
+            <div id="reg-company" class="hidden"><label for="reg-company-name" class="block text-sm font-medium text-gray-700 mb-1">Nom de l'entreprise</label><input id="reg-company-name" class="field" autocomplete="organization"></div>
+            <div><label for="reg-email" class="block text-sm font-medium text-gray-700 mb-1">Adresse e-mail</label><input type="email" id="reg-email" class="field" autocomplete="email" placeholder="vous@exemple.com"></div>
+            ${pwField("reg-password", "Mot de passe", "new-password", PW_HINT)}
+            ${pwField("reg-password2", "Confirmer le mot de passe", "new-password")}
+            <button class="btn btn-green w-full py-3" type="submit">Créer mon compte</button>
+        </form>
+        <p class="text-sm text-center mt-5 text-gray-600">Déjà un compte ? <a href="#/login" class="text-indigo-600 font-bold hover:underline">Se connecter</a></p>`);
+}
+
+async function onRegister(form) {
+    hideErr("register-error");
+    const role = $("input[name=role]:checked", form).value;
+    const body = {
+        role, email: $("#reg-email").value.trim(), password: $("#reg-password").value, password_confirm: $("#reg-password2").value,
+        first_name: $("#reg-first").value.trim(), last_name: $("#reg-last").value.trim(), company_name: $("#reg-company-name").value.trim(),
+    };
+    if (role === "student" && (!body.first_name || !body.last_name)) return showErr("register-error", "Le prénom et le nom sont obligatoires.");
+    if (role === "company" && !body.company_name) return showErr("register-error", "Le nom de l'entreprise est obligatoire.");
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.email)) return showErr("register-error", "Adresse e-mail invalide.");
+    const pe = pwError(body.password); if (pe) return showErr("register-error", pe);
+    if (body.password !== body.password_confirm) return showErr("register-error", "Les deux mots de passe ne sont pas identiques.");
+    const btn = $("button[type=submit]", form); setBusy(btn, true, "Création…");
+    const d = await api("register", { method: "POST", body });
+    setBusy(btn, false);
+    if (!d.success) return showErr("register-error", d.message);
+    sessionStorage.setItem("check-email", JSON.stringify({ email: body.email, message: d.message }));
+    sessionStorage.setItem("pending-email", body.email);
+    location.hash = "#/check-email";
+}
+
+async function vCheckEmail() {
+    let info = {}; try { info = JSON.parse(sessionStorage.getItem("check-email") || "{}"); } catch (e) {}
+    $("#view").innerHTML = authShell(`
+        <div class="text-center space-y-4">
+            <div class="mx-auto w-16 h-16 rounded-full bg-indigo-100 text-indigo-600 flex items-center justify-center text-2xl"><i class="fa-solid fa-envelope-circle-check"></i></div>
+            <h2 class="text-2xl font-bold text-gray-900">Vérifiez votre boîte mail</h2>
+            <p class="text-sm text-gray-600">${esc(info.message || "Un e-mail de confirmation a été préparé pour votre adresse.")}</p>
+            ${info.email ? `<p class="text-sm font-semibold text-gray-800">${esc(info.email)}</p>` : ""}
+            <p class="text-xs text-gray-500">Votre compte restera inactif tant que l'adresse n'est pas confirmée. Le lien est valable 24 heures.</p>
+            <div id="resend-box" data-email="${esc(info.email || "")}"><button class="btn btn-ghost" data-act="resend"><i class="fa-solid fa-rotate-right"></i> Renvoyer l'e-mail</button></div>
+            <a href="#/login" class="block text-sm text-indigo-600 font-semibold hover:underline">Aller à la connexion</a>
+        </div>`);
+}
+
+async function vVerify(r) {
+    const token = r.params.get("token") || "";
+    $("#view").innerHTML = authShell(`
+        <div class="text-center space-y-4" id="verify-box">
+            <div class="mx-auto w-16 h-16 rounded-full bg-indigo-100 text-indigo-600 flex items-center justify-center text-2xl"><i class="fa-solid fa-envelope-open-text"></i></div>
+            <h2 class="text-2xl font-bold text-gray-900">Confirmer votre adresse e-mail</h2>
+            ${/^[a-f0-9]{64}$/.test(token)
+                ? `<p class="text-sm text-gray-600">Cliquez sur le bouton ci-dessous pour activer votre compte.</p><button class="btn btn-primary w-full py-3" data-act="confirm-email" data-token="${esc(token)}">Confirmer mon adresse</button>`
+                : `<p class="text-sm text-red-600">Ce lien de confirmation est invalide.</p><a href="#/login" class="text-indigo-600 font-semibold">Retour à la connexion</a>`}
+        </div>`);
+}
+
+async function onConfirmEmail(btn) {
+    setBusy(btn, true, "Vérification…");
+    const d = await api("verify_email", { method: "POST", body: { token: btn.dataset.token } });
+    const box = $("#verify-box");
+    if (d.success) {
+        sessionStorage.setItem("flash", d.message);
+        box.innerHTML = `<div class="mx-auto w-16 h-16 rounded-full bg-green-100 text-green-600 flex items-center justify-center text-2xl"><i class="fa-solid fa-circle-check"></i></div>
+            <h2 class="text-2xl font-bold text-gray-900">Adresse confirmée</h2><p class="text-sm text-gray-600">${esc(d.message)}</p>
+            <a href="#/login" class="btn btn-primary w-full py-3">Se connecter</a>`;
+    } else {
+        setBusy(btn, false);
+        box.innerHTML = `<div class="mx-auto w-16 h-16 rounded-full bg-red-100 text-red-600 flex items-center justify-center text-2xl"><i class="fa-solid fa-circle-xmark"></i></div>
+            <h2 class="text-2xl font-bold text-gray-900">Confirmation impossible</h2><p class="text-sm text-gray-600">${esc(d.message)}</p>
+            <a href="#/login" class="btn btn-ghost w-full">Retour à la connexion</a>`;
+    }
+}
+
+async function doLogout() {
+    await api("logout", { method: "POST" });
+    state.user = null; state.unread = 0;
+    await loadMe();
+    renderNav();
+    location.hash = "#/login";
+}
+
+// ------------------------------------------------------------------ fil d'actualité
+let feedPosts = [];
+async function vFeed() {
+    const u = state.user;
+    $("#view").innerHTML = `<div class="max-w-2xl mx-auto space-y-4">
+        <form data-form="post-create" class="card p-4 space-y-3">
+            <div class="flex gap-3">${avatar(u.id, u.name, u.has_avatar)}
+                <textarea id="post-content" rows="2" maxlength="3000" placeholder="Partagez une actualité, ${esc(u.name.split(" ")[0])}…" class="field resize-none" aria-label="Contenu de la publication"></textarea></div>
+            <div id="post-preview" class="hidden"></div>
+            <div class="flex items-center justify-between">
+                <label class="btn btn-ghost cursor-pointer"><i class="fa-solid fa-image"></i> Photo<input type="file" id="post-image" accept="image/jpeg,image/png,image/webp" class="sr-only"></label>
+                <button class="btn btn-primary" type="submit"><i class="fa-solid fa-paper-plane"></i> Publier</button>
+            </div></form>
+        <div id="posts" class="space-y-4">${spinner()}</div>
+        <div id="more" class="text-center"></div></div>`;
+    feedPosts = [];
+    await loadPosts(true);
+}
+
+async function loadPosts(reset, authorId, targetSel = "#posts") {
+    const params = {};
+    if (!reset && feedPosts.length) params.before = feedPosts[feedPosts.length - 1].id;
+    if (authorId) params.author = authorId;
+    const d = await api("posts", { params });
+    const box = $(targetSel);
+    if (!box) return;
+    if (!d.success) { box.innerHTML = `<p class="text-red-600 text-sm text-center">${esc(d.message)}</p>`; return; }
+    if (reset) feedPosts = [];
+    feedPosts = feedPosts.concat(d.posts);
+    box.innerHTML = feedPosts.length ? feedPosts.map(postHTML).join("") : `<div class="card p-8 text-center text-gray-500 text-sm">Aucune publication pour le moment. Soyez le premier à publier !</div>`;
+    const more = $("#more");
+    if (more) more.innerHTML = d.posts.length === 30 ? `<button class="btn btn-ghost" data-act="more-posts" data-author="${authorId || ""}" data-target="${targetSel}">Voir plus</button>` : "";
+}
+
+function postHTML(p) {
+    return `<article class="card p-4" data-post="${p.id}">
+        <div class="flex items-start gap-3">
+            <a href="#/profile/${p.user_id}">${avatar(p.user_id, p.author, p.has_avatar)}</a>
+            <div class="flex-1 min-w-0">
+                <div class="flex items-center gap-2 flex-wrap"><a href="#/profile/${p.user_id}" class="font-semibold text-gray-900 hover:text-indigo-600 truncate">${esc(p.author)}</a>${p.verified ? verifiedBadge() : ""}${roleChip(p.author_role)}</div>
+                <p class="text-xs text-gray-400">${fmtDate(p.created_at)}${p.updated_at ? " · modifié" : ""}</p></div>
+            <div class="flex gap-1">${p.can_edit ? `<button class="btn btn-ghost !px-2.5" data-act="post-edit" data-id="${p.id}" aria-label="Modifier"><i class="fa-solid fa-pen"></i></button>` : ""}
+                ${p.can_delete ? `<button class="btn btn-ghost !px-2.5 text-red-600" data-act="post-delete" data-id="${p.id}" aria-label="Supprimer"><i class="fa-solid fa-trash"></i></button>` : ""}</div>
+        </div>
+        <div data-body class="mt-3 text-sm text-gray-700 whitespace-pre-wrap break-words">${esc(p.content)}</div>
+        ${p.has_image ? `<img src="${fileUrl("post", p.id)}" alt="Photo de la publication" loading="lazy" class="mt-3 rounded-xl max-h-[26rem] w-full object-cover border">` : ""}
+        <div class="mt-3 pt-3 border-t flex items-center gap-5 text-sm">
+            <button data-act="like" data-id="${p.id}" data-liked="${p.liked ? 1 : 0}" class="flex items-center gap-1.5 ${p.liked ? "text-indigo-600 font-semibold" : "text-gray-500 hover:text-indigo-600"}" aria-pressed="${p.liked}">
+                <i class="${p.liked ? "fa-solid" : "fa-regular"} fa-thumbs-up"></i> <span data-likes>${p.likes}</span> J'aime</button>
+            <button data-act="comments" data-id="${p.id}" class="flex items-center gap-1.5 text-gray-500 hover:text-indigo-600"><i class="fa-regular fa-comment"></i> <span data-ccount>${p.comments}</span> Commentaire${p.comments > 1 ? "s" : ""}</button>
+        </div>
+        <div data-comments class="hidden mt-3"></div></article>`;
+}
+
+async function toggleComments(id) {
+    const art = $(`[data-post="${id}"]`), box = $("[data-comments]", art);
+    if (!box.classList.contains("hidden")) { box.classList.add("hidden"); return; }
+    box.classList.remove("hidden");
+    await renderComments(id);
+}
+
+async function renderComments(id) {
+    const art = $(`[data-post="${id}"]`); if (!art) return;
+    const box = $("[data-comments]", art);
+    box.innerHTML = `<div class="text-center py-3 text-gray-400 text-sm"><i class="fa-solid fa-circle-notch fa-spin"></i></div>`;
+    const d = await api("comments", { params: { post_id: id } });
+    if (!d.success) { box.innerHTML = `<p class="text-sm text-red-600">${esc(d.message)}</p>`; return; }
+    const c = $("[data-ccount]", art); if (c) c.textContent = d.comments.length;
+    box.innerHTML = `<div class="space-y-3">${d.comments.map(cm => `
+        <div class="flex gap-2.5">${avatar(cm.user_id, cm.author, cm.has_avatar, "sm")}
+            <div class="flex-1 bg-gray-50 rounded-xl px-3 py-2 min-w-0">
+                <div class="flex justify-between items-start gap-2"><a href="#/profile/${cm.user_id}" class="text-sm font-semibold hover:text-indigo-600">${esc(cm.author)}</a>
+                    <span class="text-[11px] text-gray-400 shrink-0">${fmtDate(cm.created_at)}${cm.can_delete ? ` <button data-act="comment-delete" data-id="${cm.id}" data-post="${id}" class="ml-1 text-red-500 hover:text-red-700" aria-label="Supprimer le commentaire"><i class="fa-solid fa-trash-can"></i></button>` : ""}</span></div>
+                <p class="text-sm text-gray-700 whitespace-pre-wrap break-words">${esc(cm.content)}</p></div></div>`).join("") || `<p class="text-sm text-gray-400">Aucun commentaire.</p>`}</div>
+        <form data-form="comment" data-id="${id}" class="flex gap-2 mt-3"><input class="field !py-2" maxlength="1000" placeholder="Écrire un commentaire…" aria-label="Commentaire" required><button class="btn btn-primary" type="submit" aria-label="Envoyer"><i class="fa-solid fa-paper-plane"></i></button></form>`;
+}
+
+async function onPostCreate(form) {
+    const content = $("#post-content").value.trim(), file = $("#post-image").files[0];
+    if (!content && !file) return toast("Écrivez un texte ou ajoutez une photo.", "error");
+    const fd = new FormData(); fd.append("content", content); if (file) fd.append("image", file);
+    const btn = $("button[type=submit]", form); setBusy(btn, true, "Publication…");
+    const d = await api("post_create", { method: "POST", form: fd });
+    setBusy(btn, false);
+    if (!d.success) return toast(d.message, "error");
+    toast(d.message); $("#post-content").value = ""; $("#post-image").value = ""; $("#post-preview").classList.add("hidden");
+    loadPosts(true);
+}
+
+function startPostEdit(id) {
+    const p = feedPosts.find(x => x.id === id); if (!p) return;
+    const art = $(`[data-post="${id}"]`), body = $("[data-body]", art);
+    body.outerHTML = `<form data-form="post-edit" data-id="${id}" class="mt-3 space-y-2">
+        <textarea class="field" rows="3" maxlength="3000" aria-label="Modifier la publication">${esc(p.content)}</textarea>
+        <div class="flex flex-wrap items-center gap-3 text-sm">
+            <label class="btn btn-ghost cursor-pointer"><i class="fa-solid fa-image"></i> ${p.has_image ? "Remplacer la photo" : "Ajouter une photo"}<input type="file" accept="image/jpeg,image/png,image/webp" class="sr-only" data-edit-image></label>
+            ${p.has_image ? `<label class="flex items-center gap-1.5 text-gray-600"><input type="checkbox" data-remove-image> Retirer la photo</label>` : ""}
+            <span class="flex-1"></span>
+            <button type="button" class="btn btn-ghost" data-act="post-edit-cancel">Annuler</button><button type="submit" class="btn btn-primary">Enregistrer</button></div></form>`;
+}
+
+async function onPostEdit(form) {
+    const id = +form.dataset.id, fd = new FormData();
+    fd.append("id", id); fd.append("content", $("textarea", form).value.trim());
+    const f = $("[data-edit-image]", form).files[0]; if (f) fd.append("image", f);
+    const rm = $("[data-remove-image]", form); if (rm && rm.checked) fd.append("remove_image", "1");
+    const btn = $("button[type=submit]", form); setBusy(btn, true, "Enregistrement…");
+    const d = await api("post_update", { method: "POST", form: fd });
+    setBusy(btn, false);
+    if (!d.success) return toast(d.message, "error");
+    toast(d.message); state.v = Date.now();
+    refreshCurrentFeed();
+}
+
+function refreshCurrentFeed() {
+    const r = currentRoute();
+    if (r.name === "feed") loadPosts(true);
+    else if (r.name === "profile") loadPosts(true, +r.sub || state.user.id, "#profile-posts");
+}
+
+// ------------------------------------------------------------------ profils
+let profileCache = null;
+async function vProfile(r) {
+    if (r.sub === "edit") return vProfileEdit();
+    const id = +r.sub || state.user.id;
+    const d = await api("profile", { params: { id } });
+    if (!d.success) { $("#view").innerHTML = `<div class="card p-8 text-center text-gray-600">${esc(d.message)}</div>`; return; }
+    const p = d.profile; profileCache = p;
+    const rows = [];
+    if (p.role === "student") {
+        const s = p.student;
+        rows.push(["fa-school", "Établissement", s.school], ["fa-book-open", "Filière", s.field_of_study]);
+        if (p.is_me) rows.push(["fa-phone", "Téléphone", s.phone]);
+    } else if (p.role === "company") {
+        const c = p.company;
+        rows.push(["fa-industry", "Secteur", c.sector], ["fa-location-dot", "Adresse", c.address]);
+    }
+    if (p.email) rows.push(["fa-envelope", "E-mail", p.email]);
+    const bio = p.role === "student" ? p.student.bio : "";
+    let website = "";
+    if (p.role === "company" && p.company.website) {
+        const safe = /^https?:\/\//i.test(p.company.website) ? p.company.website : "";
+        if (safe) website = `<a href="${esc(safe)}" target="_blank" rel="noopener noreferrer nofollow" class="text-indigo-600 font-semibold hover:underline"><i class="fa-solid fa-arrow-up-right-from-square mr-1"></i>${esc(p.company.website_name || p.company.website)}</a>`;
+    }
+    $("#view").innerHTML = `<div class="max-w-3xl mx-auto space-y-4">
+        <section class="card p-5 sm:p-6"><div class="flex flex-col sm:flex-row gap-5 sm:items-center">
+            ${avatar(p.id, p.name, p.has_avatar, "lg")}
+            <div class="flex-1 min-w-0 space-y-1">
+                <div class="flex items-center gap-2 flex-wrap"><h1 class="text-2xl font-bold text-gray-900">${esc(p.company?.official_name || p.name)}</h1>${p.verified ? verifiedBadge() : ""}</div>
+                <div class="flex items-center gap-2 flex-wrap">${roleChip(p.role)}<span class="text-xs text-gray-500">${p.connections_count} relation${p.connections_count > 1 ? "s" : ""}</span></div>
+                ${website ? `<p class="text-sm">${website}</p>` : ""}
+            </div>
+            <div class="flex flex-wrap gap-2">${p.is_me
+                ? `<a href="#/profile/edit" class="btn btn-primary"><i class="fa-solid fa-pen"></i> Modifier</a><a href="#/security" class="btn btn-ghost"><i class="fa-solid fa-lock"></i> Sécurité</a>`
+                : connButton(p.id, p.connection, p.role)}</div></div>
+            ${rows.filter(x => x[2]).length ? `<dl class="mt-5 grid sm:grid-cols-2 gap-3 text-sm">${rows.filter(x => x[2]).map(([ic, l, v]) => `<div class="flex gap-2"><i class="fa-solid ${ic} text-indigo-500 w-5 mt-0.5"></i><div><dt class="text-xs text-gray-400">${l}</dt><dd class="text-gray-800 break-words">${esc(v)}</dd></div></div>`).join("")}</dl>` : ""}
+            ${bio ? `<div class="mt-5"><h2 class="text-xs font-semibold uppercase text-gray-400 mb-1">À propos</h2><p class="text-sm text-gray-700 whitespace-pre-wrap break-words">${esc(bio)}</p></div>` : ""}
+            ${p.role === "company" && (p.company.description || p.company.services) ? `<div class="mt-5 grid sm:grid-cols-2 gap-4 text-sm">
+                ${p.company.description ? `<div><h2 class="text-xs font-semibold uppercase text-gray-400 mb-1">Activités</h2><p class="whitespace-pre-wrap break-words">${esc(p.company.description)}</p></div>` : ""}
+                ${p.company.services ? `<div><h2 class="text-xs font-semibold uppercase text-gray-400 mb-1">Services proposés</h2><p class="whitespace-pre-wrap break-words">${esc(p.company.services)}</p></div>` : ""}</div>` : ""}
+        </section>
+        ${p.is_me && p.role === "company" ? verificationPanel(p) : ""}
+        <h2 class="font-bold text-gray-800 px-1">Publications</h2>
+        <div id="profile-posts" class="space-y-4">${spinner()}</div><div id="more" class="text-center"></div></div>`;
+    await loadPosts(true, p.id, "#profile-posts");
+}
+
+function connButton(id, c, role) {
+    if (!c || !["student", "company"].includes(role) || !["student", "company"].includes(state.user.role)) return "";
+    if (state.user.role === "company" && role === "company") return "";
+    switch (c.state) {
+        case "connected": return `<span class="btn btn-ghost !cursor-default text-green-700"><i class="fa-solid fa-user-check"></i> En relation</span>`;
+        case "sent": return `<button class="btn btn-ghost" data-act="invite-cancel" data-id="${c.id}"><i class="fa-solid fa-xmark"></i> Annuler l'invitation</button>`;
+        case "received": return `<button class="btn btn-green" data-act="invite-accept" data-id="${c.id}"><i class="fa-solid fa-check"></i> Accepter</button><button class="btn btn-ghost" data-act="invite-decline" data-id="${c.id}">Refuser</button>`;
+        case "declined": return `<span class="btn btn-ghost !cursor-default text-gray-500">Invitation refusée</span>`;
+        default: return `<button class="btn btn-primary" data-act="invite-send" data-uid="${id}"><i class="fa-solid fa-user-plus"></i> Inviter</button>`;
+    }
+}
+
+function verificationPanel(p) {
+    const st = p.verification_status, req = p.verification_request;
+    const styles = { pending: "bg-amber-50 border-amber-200 text-amber-800", verified: "bg-emerald-50 border-emerald-200 text-emerald-800", rejected: "bg-red-50 border-red-200 text-red-800" };
+    let body = "";
+    if (st === "verified") body = `<p class="text-sm">Votre entreprise est vérifiée : le badge est affiché sur votre profil et vos publications.</p>`;
+    else if (req && req.status === "pending") body = `<p class="text-sm">Votre dossier (<strong>${esc(req.legal_name)}</strong>, envoyé le ${fmtDate(req.created_at)}) est en cours d'examen par un administrateur.</p>`;
+    else {
+        if (st === "rejected" && req?.rejection_reason) body += `<p class="text-sm mb-3"><strong>Motif du refus :</strong> ${esc(req.rejection_reason)}</p>`;
+        else body += `<p class="text-sm mb-3">Pour obtenir le badge « Vérifiée », transmettez les informations légales de votre entreprise.</p>`;
+        body += `<form data-form="verification" class="space-y-3 bg-white/70 rounded-xl p-4 text-gray-800">
+            <div class="grid sm:grid-cols-2 gap-3">
+                <div><label class="block text-xs font-medium mb-1" for="v-legal">Nom légal de l'entreprise</label><input id="v-legal" class="field" required value="${esc(p.company.official_name || "")}"></div>
+                <div><label class="block text-xs font-medium mb-1" for="v-reg">N° d'immatriculation / identifiant fiscal</label><input id="v-reg" class="field" required placeholder="ex. RC 12345-AB"></div></div>
+            <div><label class="block text-xs font-medium mb-1" for="v-doc">Justificatif (extrait Kbis, registre du commerce… PDF, JPG ou PNG, 5 Mo max)</label><input type="file" id="v-doc" accept="application/pdf,image/jpeg,image/png" class="field" required></div>
+            <div><label class="block text-xs font-medium mb-1" for="v-extra">Informations complémentaires (facultatif)</label><textarea id="v-extra" rows="2" class="field" maxlength="2000"></textarea></div>
+            <button class="btn btn-primary" type="submit"><i class="fa-solid fa-paper-plane"></i> Envoyer ma demande</button>
+            <p class="text-xs text-gray-500">Le document n'est visible que par vous et les administrateurs de CampusLink.</p></form>`;
+    }
+    return `<section class="rounded-2xl border p-5 ${styles[st] || styles.pending}"><h2 class="font-bold mb-1"><i class="fa-solid fa-shield-halved mr-1"></i> Statut de vérification : ${VERIF[st] || st}</h2>${body}</section>`;
+}
+
+async function onVerification(form) {
+    const f = $("#v-doc").files[0];
+    if (!f) return toast("Ajoutez le justificatif.", "error");
+    const fd = new FormData();
+    fd.append("legal_name", $("#v-legal").value.trim()); fd.append("registration_number", $("#v-reg").value.trim());
+    fd.append("extra_info", $("#v-extra").value.trim()); fd.append("document", f);
+    const btn = $("button[type=submit]", form); setBusy(btn, true, "Envoi…");
+    const d = await api("submit_verification", { method: "POST", form: fd });
+    setBusy(btn, false);
+    toast(d.message, d.success ? "success" : "error");
+    if (d.success) route();
+}
+
+function avatarSection(p) {
+    return `<h2 class="font-semibold mb-3">${p.role === "student" ? "Photo de profil" : "Logo / photo de profil"}</h2>
+        <div class="flex items-center gap-4"><div id="avatar-preview">${avatar(p.id, p.name, p.has_avatar, "lg")}</div>
+            <div class="space-y-2"><label class="btn btn-primary cursor-pointer"><i class="fa-solid fa-camera"></i> ${p.has_avatar ? "Changer" : "Ajouter"}<input type="file" id="avatar-file" accept="image/jpeg,image/png,image/webp" class="sr-only"></label>
+                ${p.has_avatar ? `<button class="btn btn-ghost text-red-600 ml-2" data-act="avatar-delete"><i class="fa-solid fa-trash"></i> Supprimer</button>` : ""}
+                <p class="text-xs text-gray-500">JPG, PNG ou WebP, 3 Mo maximum.</p></div></div>`;
+}
+
+// met à jour uniquement la section photo (les champs en cours de saisie ne sont pas perdus)
+async function refreshAvatarSection() {
+    await loadMe(); renderNav();
+    const d = await api("profile", { params: { id: state.user.id } });
+    const sec = $("#avatar-section");
+    if (d.success && sec) sec.innerHTML = avatarSection(d.profile);
+}
+
+async function vProfileEdit() {
+    const d = await api("profile", { params: { id: state.user.id } });
+    if (!d.success) { $("#view").innerHTML = `<div class="card p-8 text-center">${esc(d.message)}</div>`; return; }
+    const p = d.profile, isS = p.role === "student", s = p.student || {}, c = p.company || {};
+    const input = (id, label, val, extra = "") => `<div><label for="${id}" class="block text-sm font-medium text-gray-700 mb-1">${label}</label><input id="${id}" class="field" value="${esc(val || "")}" ${extra}></div>`;
+    const area = (id, label, val, max) => `<div><label for="${id}" class="block text-sm font-medium text-gray-700 mb-1">${label}</label><textarea id="${id}" rows="4" maxlength="${max}" class="field">${esc(val || "")}</textarea></div>`;
+    $("#view").innerHTML = `<div class="max-w-2xl mx-auto space-y-4">
+        <div class="flex items-center justify-between"><h1 class="text-2xl font-bold text-gray-900">Modifier mon profil</h1><a href="#/profile" class="text-sm text-indigo-600 font-semibold">← Voir mon profil</a></div>
+        <section id="avatar-section" class="card p-5">${avatarSection(p)}</section>
+        <form data-form="profile-edit" class="card p-5 space-y-4" novalidate>
+            <h2 class="font-semibold">Informations</h2>
+            ${errBox("profile-error")}
+            ${isS ? `<div class="grid grid-cols-2 gap-3">${input("pe-first", "Prénom", s.first_name, "required")}${input("pe-last", "Nom", s.last_name, "required")}</div>
+                ${input("pe-school", "Université / établissement", s.school)}${input("pe-field", "Filière d'études", s.field_of_study)}
+                ${input("pe-phone", "Téléphone (visible uniquement par vous)", s.phone, 'type="tel"')}
+                ${area("pe-bio", "Biographie / présentation", s.bio, 2000)}`
+            : `${input("pe-official", "Nom officiel de l'entreprise", c.official_name, "required")}${input("pe-sector", "Secteur d'activité", c.sector)}
+                ${area("pe-desc", "Activités", c.description, 3000)}${area("pe-services", "Services proposés", c.services, 3000)}
+                ${input("pe-address", "Adresse", c.address)}
+                <div class="grid sm:grid-cols-2 gap-3">${input("pe-wname", "Nom du site web (facultatif)", c.website_name)}${input("pe-url", "URL du site web (facultatif)", c.website, 'type="url" placeholder="https://…"')}</div>
+                <p class="text-xs text-gray-500">Le statut de vérification ne peut être modifié que par un administrateur, après examen de votre dossier.</p>`}
+            <div class="flex gap-2"><button class="btn btn-primary" type="submit">Enregistrer</button><a href="#/profile" class="btn btn-ghost">Annuler</a></div></form>
+        <a href="#/security" class="card p-4 flex items-center justify-between hover:bg-gray-50 text-sm font-semibold text-gray-700"><span><i class="fa-solid fa-lock text-indigo-500 mr-2"></i>Modifier mon mot de passe</span><i class="fa-solid fa-chevron-right text-gray-400"></i></a></div>`;
+}
+
+async function onProfileEdit(form) {
+    hideErr("profile-error");
+    const v = id => ($("#" + id)?.value || "").trim();
+    const body = state.user.role === "student"
+        ? { first_name: v("pe-first"), last_name: v("pe-last"), school: v("pe-school"), field_of_study: v("pe-field"), phone: v("pe-phone"), bio: v("pe-bio") }
+        : { official_name: v("pe-official"), sector: v("pe-sector"), description: v("pe-desc"), services: v("pe-services"), address: v("pe-address"), website_name: v("pe-wname"), website: v("pe-url") };
+    if (state.user.role === "company" && body.website && !/^https?:\/\//i.test(body.website)) return showErr("profile-error", "L'URL du site doit commencer par http:// ou https://.");
+    const btn = $("button[type=submit]", form); setBusy(btn, true, "Enregistrement…");
+    const d = await api("update_profile", { method: "POST", body });
+    setBusy(btn, false);
+    if (!d.success) return showErr("profile-error", d.message);
+    await loadMe(); renderNav();
+    toast(d.message); location.hash = "#/profile";
+}
+
+async function onAvatarChosen(input) {
+    const f = input.files[0]; if (!f) return;
+    const fd = new FormData(); fd.append("avatar", f);
+    const d = await api("avatar_set", { method: "POST", form: fd });
+    toast(d.message, d.success ? "success" : "error");
+    if (d.success) { state.v = Date.now(); await refreshAvatarSection(); }
+}
+
+async function vSecurity() {
+    $("#view").innerHTML = `<div class="max-w-md mx-auto space-y-4">
+        <div class="flex items-center justify-between"><h1 class="text-2xl font-bold text-gray-900">Sécurité</h1><a href="#/profile" class="text-sm text-indigo-600 font-semibold">← Mon profil</a></div>
+        <form data-form="password" class="card p-5 space-y-4" novalidate>
+            <h2 class="font-semibold">Modifier mon mot de passe</h2>
+            ${errBox("pw-error")}
+            ${pwField("pw-current", "Mot de passe actuel", "current-password")}
+            ${pwField("pw-new", "Nouveau mot de passe", "new-password", PW_HINT)}
+            ${pwField("pw-new2", "Confirmer le nouveau mot de passe", "new-password")}
+            <button class="btn btn-primary w-full py-3" type="submit">Mettre à jour le mot de passe</button>
+            <p class="text-xs text-gray-500">Après le changement, vos autres sessions (autres appareils) seront déconnectées.</p></form></div>`;
+}
+
+async function onPassword(form) {
+    hideErr("pw-error");
+    const cur = $("#pw-current").value, n = $("#pw-new").value, n2 = $("#pw-new2").value;
+    const pe = pwError(n); if (pe) return showErr("pw-error", pe);
+    if (n !== n2) return showErr("pw-error", "La confirmation ne correspond pas au nouveau mot de passe.");
+    const btn = $("button[type=submit]", form); setBusy(btn, true, "Mise à jour…");
+    const d = await api("change_password", { method: "POST", body: { current_password: cur, new_password: n, new_password_confirm: n2 } });
+    setBusy(btn, false);
+    if (!d.success) return showErr("pw-error", d.message);
+    state.csrf = d.csrf; form.reset(); toast(d.message);
+}
+
+// ------------------------------------------------------------------ réseau, invitations
+const personCard = (x, extra = "") => `<div class="card p-4 flex items-center gap-3">
+    <a href="#/profile/${x.id}">${avatar(x.id, x.name, x.has_avatar)}</a>
+    <div class="flex-1 min-w-0"><a href="#/profile/${x.id}" class="font-semibold text-gray-900 hover:text-indigo-600 block truncate">${esc(x.name)}</a>
+        <div class="flex items-center gap-2 flex-wrap">${roleChip(x.role)}${x.verified ? verifiedBadge() : ""}</div>
+        <p class="text-xs text-gray-500 truncate">${esc(x.role === "student" ? [x.school, x.field_of_study].filter(Boolean).join(" · ") : x.sector || "")}</p></div>
+    <div class="flex gap-2 flex-wrap justify-end">${extra}</div></div>`;
+
+let peopleTimer;
+async function vPeople() {
+    $("#view").innerHTML = `<div class="max-w-3xl mx-auto space-y-4"><h1 class="text-2xl font-bold text-gray-900">Réseau</h1>
+        <div class="card p-3 flex gap-2 flex-col sm:flex-row"><input id="people-q" type="search" class="field" placeholder="Rechercher un nom, une école, un secteur…" aria-label="Rechercher">
+            <select id="people-role" class="field sm:w-44" aria-label="Type"><option value="">Tous</option><option value="student">Étudiants</option><option value="company">Entreprises</option></select></div>
+        <div id="people-list">${spinner()}</div></div>`;
+    await loadPeople();
+}
+async function loadPeople() {
+    const d = await api("people", { params: { q: $("#people-q")?.value || "", role: $("#people-role")?.value || "" } });
+    const box = $("#people-list"); if (!box) return;
+    if (!d.success) { box.innerHTML = `<p class="text-red-600 text-sm">${esc(d.message)}</p>`; return; }
+    box.innerHTML = d.people.length ? `<div class="space-y-3">${d.people.map(x => personCard(x, connButton(x.id, x.connection, x.role))).join("")}</div>` : `<div class="card p-8 text-center text-gray-500 text-sm">Aucun résultat.</div>`;
+}
+
+async function vInvitations() {
+    const d = await api("connections");
+    if (!d.success) { $("#view").innerHTML = `<div class="card p-8 text-center">${esc(d.message)}</div>`; return; }
+    const sec = (title, icon, items, empty, render) => `<section><h2 class="font-bold text-gray-800 mb-2"><i class="fa-solid ${icon} text-indigo-500 mr-1"></i> ${title} <span class="text-gray-400 font-normal">(${items.length})</span></h2>
+        ${items.length ? `<div class="space-y-3">${items.map(render).join("")}</div>` : `<div class="card p-5 text-sm text-gray-500 text-center">${empty}</div>`}</section>`;
+    $("#view").innerHTML = `<div class="max-w-3xl mx-auto space-y-6"><h1 class="text-2xl font-bold text-gray-900">Invitations</h1>
+        ${sec("Invitations reçues en attente", "fa-inbox", d.received, "Aucune invitation en attente.", i => personCard({ ...i, id: i.user_id }, `<button class="btn btn-green" data-act="invite-accept" data-id="${i.id}"><i class="fa-solid fa-check"></i> Accepter</button><button class="btn btn-ghost" data-act="invite-decline" data-id="${i.id}">Refuser</button>`))}
+        ${sec("Invitations envoyées", "fa-paper-plane", d.sent, "Aucune invitation envoyée en attente.", i => personCard({ ...i, id: i.user_id }, `<span class="chip bg-amber-100 text-amber-700 self-center">En attente</span><button class="btn btn-ghost" data-act="invite-cancel" data-id="${i.id}">Annuler</button>`))}
+        ${sec("Mes relations", "fa-user-group", d.friends, "Pas encore de relation. <a class='text-indigo-600 font-semibold' href='#/people'>Trouver des personnes</a>", i => personCard({ ...i, id: i.user_id }, `<button class="btn btn-ghost text-red-600" data-act="connection-remove" data-id="${i.id}" aria-label="Supprimer la relation"><i class="fa-solid fa-user-minus"></i></button>`))}
+    </div>`;
+}
+
+// ------------------------------------------------------------------ notifications
+const NOTIF_ICON = { invitation_received: "fa-user-plus text-indigo-500", invitation_accepted: "fa-user-check text-green-600", post_liked: "fa-thumbs-up text-indigo-500", post_commented: "fa-comment text-amber-500", verification_update: "fa-shield-halved text-emerald-600" };
+const NOTIF_LINK = { invitation_received: "#/invitations", invitation_accepted: "#/invitations", post_liked: "#/feed", post_commented: "#/feed", verification_update: "#/profile" };
+async function vNotifications() {
+    const d = await api("notifications");
+    if (!d.success) { $("#view").innerHTML = `<div class="card p-8 text-center">${esc(d.message)}</div>`; return; }
+    state.unread = d.unread; renderNav();
+    $("#view").innerHTML = `<div class="max-w-2xl mx-auto space-y-4">
+        <div class="flex items-center justify-between"><h1 class="text-2xl font-bold text-gray-900">Notifications ${d.unread ? `<span class="chip bg-amber-100 text-amber-700 align-middle">${d.unread} non lue${d.unread > 1 ? "s" : ""}</span>` : ""}</h1>
+            ${d.unread ? `<button class="btn btn-ghost" data-act="notif-all"><i class="fa-solid fa-check-double"></i> Tout marquer comme lu</button>` : ""}</div>
+        ${d.notifications.length ? `<div class="card divide-y overflow-hidden">${d.notifications.map(n => `
+            <a href="${NOTIF_LINK[n.type] || "#/feed"}" data-act="notif-open" data-id="${n.id}" class="flex gap-3 p-4 hover:bg-gray-50 ${n.is_read ? "" : "bg-indigo-50/60"}">
+                <i class="fa-solid ${NOTIF_ICON[n.type] || "fa-bell"} mt-1 w-5 text-center"></i>
+                <div class="flex-1 min-w-0"><p class="text-sm ${n.is_read ? "text-gray-600" : "text-gray-900 font-semibold"}">${esc(n.message)}</p><p class="text-xs text-gray-400 mt-0.5">${fmtDate(n.created_at)}</p></div>
+                ${n.is_read ? "" : `<span class="w-2.5 h-2.5 rounded-full bg-indigo-500 mt-2 shrink-0" aria-label="Non lue"></span>`}</a>`).join("")}</div>`
+        : `<div class="card p-10 text-center text-gray-500 text-sm"><i class="fa-regular fa-bell text-3xl mb-2 block text-gray-300"></i>Aucune notification.</div>`}</div>`;
+}
+
+// ------------------------------------------------------------------ offres & marketplace
+async function vJobs() {
+    const u = state.user;
+    const d = await api("jobs");
+    $("#view").innerHTML = `<div class="max-w-3xl mx-auto space-y-4"><h1 class="text-2xl font-bold text-gray-900">Offres de stages et d'emplois</h1>
+        ${["company", "admin"].includes(u.role) ? `<form data-form="job" class="card p-4 space-y-3 border-indigo-200"><h2 class="font-bold text-indigo-700 text-sm"><i class="fa-solid fa-briefcase"></i> Publier une offre</h2>
+            <input id="job-title" class="field" placeholder="Titre du poste" maxlength="150" required aria-label="Titre du poste">
+            <select id="job-type" class="field" aria-label="Type d'offre"><option>Stage</option><option>Emploi</option><option>Alternance</option></select>
+            <textarea id="job-desc" class="field" rows="3" placeholder="Description de l'offre…" required aria-label="Description"></textarea>
+            <button class="btn btn-primary" type="submit">Mettre en ligne</button><p class="text-xs text-gray-500">Le nom affiché est celui de votre compte.</p></form>` : ""}
+        <div id="jobs" class="space-y-3">${!d.success ? `<p class="text-red-600 text-sm">${esc(d.message)}</p>` : d.jobs.length ? d.jobs.map(j => `
+            <div class="card p-4 flex flex-col sm:flex-row sm:items-start gap-3 justify-between"><div class="min-w-0">
+                <div class="flex items-center gap-2 flex-wrap"><h3 class="font-bold text-gray-900">${esc(j.title)}</h3><span class="chip bg-indigo-50 text-indigo-700">${esc(j.type)}</span></div>
+                <p class="text-sm font-semibold text-indigo-600 mt-0.5"><a href="#/profile/${j.company_id}" class="hover:underline">${esc(j.company_name)}</a> ${j.verified ? verifiedBadge() : ""}</p>
+                <p class="text-sm text-gray-600 mt-2 whitespace-pre-wrap break-words">${esc(j.description)}</p></div>
+                ${u.role === "student" ? (j.applied ? `<span class="chip bg-green-100 text-green-700 self-start">Candidature envoyée</span>` : `<button class="btn btn-green self-start" data-act="job-apply" data-id="${j.id}">Postuler</button>`) : ""}</div>`).join("")
+            : `<div class="card p-8 text-center text-gray-500 text-sm">Aucune offre disponible.</div>`}</div></div>`;
+}
+
+async function vMarket() {
+    const u = state.user, d = await api("products");
+    $("#view").innerHTML = `<div class="space-y-4"><h1 class="text-2xl font-bold text-gray-900">Marketplace Campus</h1>
+        ${u.role === "admin" ? `<form data-form="product" class="card p-4 space-y-3 border-amber-300 bg-amber-50/40"><h2 class="font-bold text-amber-800 text-sm"><i class="fa-solid fa-shield-halved text-amber-600"></i> Ajouter un article (réservé admin)</h2>
+            <input id="prod-title" class="field" placeholder="Titre de l'article" required aria-label="Titre"><textarea id="prod-desc" class="field" rows="2" placeholder="Description courte…" required aria-label="Description"></textarea>
+            <input id="prod-price" type="number" min="0" step="1" class="field" placeholder="Prix (FCFA)" required aria-label="Prix"><button class="btn bg-amber-600 text-white hover:bg-amber-700" type="submit">Publier sur la Marketplace</button></form>` : ""}
+        <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">${!d.success ? `<p class="text-red-600 text-sm">${esc(d.message)}</p>` : d.products.length ? d.products.map(p => `
+            <div class="card p-4 flex flex-col justify-between"><div><h3 class="font-bold text-sm text-gray-800">${esc(p.title)}</h3><p class="text-xs text-gray-500 mt-1 whitespace-pre-wrap break-words">${esc(p.description)}</p></div>
+                <p class="text-indigo-600 font-bold text-sm mt-3">${esc(Number(p.price).toLocaleString("fr-FR"))} FCFA</p></div>`).join("")
+            : `<p class="text-gray-500 text-sm col-span-full">Aucun article sur la marketplace.</p>`}</div></div>`;
+}
+
+// ------------------------------------------------------------------ administration
+let adminTab = "pending";
+async function vAdmin() {
+    if (state.user.role !== "admin") { $("#view").innerHTML = `<div class="card p-8 text-center text-gray-600">Espace réservé aux administrateurs.</div>`; return; }
+    const s = (await api("stats")).stats || {};
+    const tile = (l, v, ic) => `<div class="card p-4 text-center"><i class="fa-solid ${ic} text-indigo-400"></i><p class="text-2xl font-bold text-indigo-600">${v ?? 0}</p><p class="text-xs text-gray-500">${l}</p></div>`;
+    $("#view").innerHTML = `<div class="space-y-5"><h1 class="text-2xl font-bold text-gray-900"><i class="fa-solid fa-shield-halved text-indigo-500"></i> Administration</h1>
+        <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">${tile("Utilisateurs", s.users, "fa-users")}${tile("Publications", s.posts, "fa-pen")}${tile("Offres", s.jobs, "fa-briefcase")}${tile("Produits", s.products, "fa-store")}${tile("À examiner", s.pending_verifications, "fa-hourglass-half")}${tile("Entreprises vérifiées", s.verified_companies, "fa-circle-check")}</div>
+        <div class="flex gap-2 flex-wrap" role="tablist">${[["pending", "Demandes en attente"], ["done", "Demandes traitées"], ["verified", "Entreprises vérifiées"], ["waiting", "Entreprises en attente"]].map(([k, l]) =>
+            `<button role="tab" data-act="admin-tab" data-tab="${k}" class="btn ${adminTab === k ? "btn-primary" : "btn-ghost"}">${l}</button>`).join("")}</div>
+        <div id="admin-body">${spinner()}</div></div>`;
+    await loadAdminTab();
+}
+
+async function loadAdminTab() {
+    const box = $("#admin-body"); if (!box) return;
+    if (adminTab === "pending" || adminTab === "done") {
+        const calls = adminTab === "pending" ? [await api("admin_verifications", { params: { status: "pending" } })]
+            : [await api("admin_verifications", { params: { status: "approved" } }), await api("admin_verifications", { params: { status: "rejected" } })];
+        const items = calls.flatMap(c => c.items || []).sort((a, b) => b.created_at.localeCompare(a.created_at));
+        box.innerHTML = items.length ? `<div class="space-y-3">${items.map(verifCard).join("")}</div>` : `<div class="card p-8 text-center text-gray-500 text-sm">Aucune demande.</div>`;
+    } else {
+        const d = await api("admin_companies", { params: { status: adminTab === "verified" ? "verified" : "pending" } });
+        const list = d.companies || [];
+        box.innerHTML = list.length ? `<div class="card divide-y">${list.map(c => `<div class="p-4 flex items-center justify-between gap-3"><div class="min-w-0"><a href="#/profile/${c.id}" class="font-semibold text-gray-900 hover:text-indigo-600">${esc(c.name)}</a><p class="text-xs text-gray-500">${esc(c.email)} · ${esc(c.sector || "secteur non renseigné")}</p></div>
+            <span class="chip ${c.verification_status === "verified" ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}">${VERIF[c.verification_status]}</span></div>`).join("")}</div>`
+            : `<div class="card p-8 text-center text-gray-500 text-sm">Aucune entreprise dans cette catégorie.</div>`;
+    }
+}
+
+function verifCard(v) {
+    const badge = { pending: ["bg-amber-100 text-amber-700", "En attente"], approved: ["bg-emerald-100 text-emerald-700", "Acceptée"], rejected: ["bg-red-100 text-red-700", "Refusée"] }[v.status];
+    return `<article class="card p-5 space-y-3" data-verif="${v.id}"><div class="flex items-start justify-between gap-3 flex-wrap">
+        <div><a href="#/profile/${v.company_id}" class="font-bold text-gray-900 hover:text-indigo-600">${esc(v.company_name)}</a><p class="text-xs text-gray-500">${esc(v.email)} · demande du ${fmtDate(v.created_at)}</p></div>
+        <span class="chip ${badge[0]}">${badge[1]}</span></div>
+        <dl class="grid sm:grid-cols-2 gap-3 text-sm"><div><dt class="text-xs text-gray-400">Nom légal</dt><dd>${esc(v.legal_name)}</dd></div><div><dt class="text-xs text-gray-400">N° d'immatriculation / identifiant fiscal</dt><dd>${esc(v.registration_number)}</dd></div>
+            ${v.extra_info ? `<div class="sm:col-span-2"><dt class="text-xs text-gray-400">Informations complémentaires</dt><dd class="whitespace-pre-wrap break-words">${esc(v.extra_info)}</dd></div>` : ""}
+            ${v.rejection_reason ? `<div class="sm:col-span-2"><dt class="text-xs text-gray-400">Motif du refus</dt><dd class="text-red-700">${esc(v.rejection_reason)}</dd></div>` : ""}</dl>
+        <div class="flex flex-wrap gap-2 items-center"><a class="btn btn-ghost" target="_blank" rel="noopener" href="${API}?action=file&kind=document&id=${v.id}"><i class="fa-solid fa-file-lines"></i> Examiner le justificatif</a>
+            ${v.status === "pending" ? `<button class="btn btn-green" data-act="verif-approve" data-id="${v.id}"><i class="fa-solid fa-check"></i> Accepter</button><button class="btn btn-red" data-act="verif-reject-open" data-id="${v.id}"><i class="fa-solid fa-xmark"></i> Refuser</button>` : ""}</div>
+        <form data-form="verif-reject" data-id="${v.id}" class="hidden space-y-2"><label class="block text-sm font-medium" for="rr-${v.id}">Motif du refus (obligatoire, transmis à l'entreprise)</label><textarea id="rr-${v.id}" class="field" rows="2" maxlength="1000" required></textarea>
+            <button class="btn btn-red" type="submit">Confirmer le refus</button></form></article>`;
+}
+
+// ------------------------------------------------------------------ gestionnaires d'événements (délégation)
+document.addEventListener("click", async (e) => {
+    const pw = e.target.closest("[data-toggle-pw]");
+    if (pw) {
+        const inp = document.getElementById(pw.dataset.togglePw), show = inp.type === "password";
+        inp.type = show ? "text" : "password";
+        pw.innerHTML = `<i class="fa-solid ${show ? "fa-eye-slash" : "fa-eye"}"></i>`;
+        return;
+    }
+    const menu = $("#user-menu");
+    if (menu && !e.target.closest("[data-act=toggle-menu]") && !e.target.closest("#user-menu")) menu.classList.add("hidden");
+    else if (menu && e.target.closest("#user-menu a")) menu.classList.add("hidden");
+
+    const el = e.target.closest("[data-act]");
+    if (!el) return;
+    const act = el.dataset.act, id = +el.dataset.id || 0;
+    const run = async (action, body, okMsg) => {
+        const d = await api(action, { method: "POST", body });
+        if (!d.success) { toast(d.message, "error"); return d; }
+        if (okMsg !== false) toast(d.message || okMsg);
+        return d;
+    };
+    switch (act) {
+        case "toggle-menu": $("#user-menu").classList.toggle("hidden"); break;
+        case "logout": await doLogout(); break;
+        case "resend": await onResend(el); break;
+        case "confirm-email": await onConfirmEmail(el); break;
+        case "more-posts": await loadPosts(false, +el.dataset.author || 0, el.dataset.target); break;
+        case "like": {
+            const liked = el.dataset.liked !== "1";
+            const d = await api("like_set", { method: "POST", body: { post_id: id, liked } });
+            if (!d.success) return toast(d.message, "error");
+            const p = feedPosts.find(x => x.id === id); if (p) { p.liked = d.liked; p.likes = d.likes; }
+            const art = $(`[data-post="${id}"]`); if (art && p) { const tmp = document.createElement("div"); tmp.innerHTML = postHTML(p); const bar = $(".border-t", tmp), old = $(".border-t", art); old.replaceWith(bar); }
+            break;
+        }
+        case "comments": await toggleComments(id); break;
+        case "comment-delete": if (confirm("Supprimer ce commentaire ?")) { const d = await run("comment_delete", { id }, false); if (d.success) renderComments(+el.dataset.post); } break;
+        case "post-edit": startPostEdit(id); break;
+        case "post-edit-cancel": refreshCurrentFeed(); break;
+        case "post-delete": if (confirm("Supprimer cette publication ?")) { const d = await run("post_delete", { id }); if (d.success) refreshCurrentFeed(); } break;
+        case "invite-send": { const d = await run("invite_send", { user_id: +el.dataset.uid }); if (d.success) refreshAfterConn(); break; }
+        case "invite-accept": case "invite-decline": { const d = await run("invite_respond", { id, decision: act === "invite-accept" ? "accept" : "decline" }); if (d.success) refreshAfterConn(); break; }
+        case "invite-cancel": { const d = await run("invite_cancel", { id }); if (d.success) refreshAfterConn(); break; }
+        case "connection-remove": if (confirm("Supprimer cette relation ?")) { const d = await run("connection_remove", { id }); if (d.success) refreshAfterConn(); } break;
+        case "notif-open": api("notif_read", { method: "POST", body: { id } }); break;
+        case "notif-all": { const d = await run("notif_read_all", {}, false); if (d.success) { state.unread = 0; vNotifications(); } break; }
+        case "avatar-delete": if (confirm("Supprimer votre photo de profil ?")) { const d = await run("avatar_delete", {}); if (d.success) await refreshAvatarSection(); } break;
+        case "job-apply": { const d = await run("job_apply", { job_id: id }); if (d.success) vJobs(); break; }
+        case "admin-tab": adminTab = el.dataset.tab; vAdmin(); break;
+        case "verif-approve": if (confirm("Confirmer la vérification de cette entreprise ? Le badge sera affiché publiquement.")) { const d = await run("admin_review", { id, decision: "approve" }); if (d.success) vAdmin(); } break;
+        case "verif-reject-open": $(`[data-form="verif-reject"][data-id="${id}"]`).classList.toggle("hidden"); break;
+    }
+});
+
+function refreshAfterConn() {
+    const r = currentRoute();
+    if (r.name === "people") loadPeople(); else if (r.name === "invitations") vInvitations(); else route();
+}
+
+document.addEventListener("submit", async (e) => {
+    const form = e.target.closest("[data-form]");
+    if (!form) return;
+    e.preventDefault();
+    const handlers = { login: onLogin, register: onRegister, "post-create": onPostCreate, "post-edit": onPostEdit, "profile-edit": onProfileEdit, password: onPassword, verification: onVerification };
+    const name = form.dataset.form;
+    if (handlers[name]) return handlers[name](form);
+    const btn = $("button[type=submit]", form);
+    if (name === "comment") {
+        const inp = $("input", form), id = +form.dataset.id; if (!inp.value.trim()) return;
+        setBusy(btn, true, "");
+        const d = await api("comment_add", { method: "POST", body: { post_id: id, content: inp.value.trim() } });
+        setBusy(btn, false);
+        return d.success ? renderComments(id) : toast(d.message, "error");
+    }
+    if (name === "job") {
+        setBusy(btn, true, "Publication…");
+        const d = await api("job_create", { method: "POST", body: { title: $("#job-title").value, type: $("#job-type").value, description: $("#job-desc").value } });
+        setBusy(btn, false); toast(d.message, d.success ? "success" : "error"); if (d.success) vJobs();
+    } else if (name === "product") {
+        setBusy(btn, true, "Publication…");
+        const d = await api("product_create", { method: "POST", body: { title: $("#prod-title").value, description: $("#prod-desc").value, price: $("#prod-price").value } });
+        setBusy(btn, false); toast(d.message, d.success ? "success" : "error"); if (d.success) vMarket();
+    } else if (name === "verif-reject") {
+        const reason = $("textarea", form).value.trim(); if (!reason) return toast("Le motif est obligatoire.", "error");
+        setBusy(btn, true, "…");
+        const d = await api("admin_review", { method: "POST", body: { id: +form.dataset.id, decision: "reject", reason } });
+        setBusy(btn, false); toast(d.message, d.success ? "success" : "error"); if (d.success) vAdmin();
+    }
+});
+
+document.addEventListener("change", (e) => {
+    if (e.target.matches("input[name=role]")) {
+        const company = e.target.value === "company";
+        $("#reg-student").classList.toggle("hidden", company); $("#reg-company").classList.toggle("hidden", !company);
+    } else if (e.target.id === "avatar-file") onAvatarChosen(e.target);
+    else if (e.target.id === "people-role") loadPeople();
+    else if (e.target.id === "post-image") {
+        const f = e.target.files[0], box = $("#post-preview");
+        if (!f) return box.classList.add("hidden");
+        if (f.size > 5 * 1048576) { toast("Image trop volumineuse (5 Mo max).", "error"); e.target.value = ""; return; }
+        box.innerHTML = `<img class="rounded-xl max-h-48 border" alt="Aperçu" src="${URL.createObjectURL(f)}">`; box.classList.remove("hidden");
+    }
+});
+document.addEventListener("input", (e) => {
+    if (e.target.id === "people-q") { clearTimeout(peopleTimer); peopleTimer = setTimeout(loadPeople, 300); }
+});
+
+window.addEventListener("hashchange", route);
+setInterval(async () => {   // rafraîchit le compteur de notifications
+    if (!state.user || document.hidden) return;
+    const d = await api("notifications");
+    if (d.success) { state.unread = d.unread; updateBadge(); }
+}, 60000);
+
+(async function init() {
+    await loadMe();
+    await route();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+# Apache : empêche l'accès direct aux fichiers sensibles
+Options -Indexes
+<FilesMatch "^(config(\.example)?\.php|schema\.sql|migration\.sql|README\.md)$">
+    Require all denied
+</FilesMatch>
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteRule ^(includes|tools|storage)(/|$) - [F,L]
+</IfModule>
