@@ -229,7 +229,7 @@ async function vLogin(r) {
         ${flash ? `<div class="mb-4 p-3 bg-green-50 border border-green-200 text-green-700 text-sm rounded-xl">${esc(flash)}</div>` : ""}
         ${errBox("login-error")}
         <div id="resend-box" class="hidden mb-4 p-3 bg-amber-50 border border-amber-200 text-amber-800 text-sm rounded-xl">
-            Votre adresse n'est pas confirmée. <button type="button" class="font-semibold underline" data-act="resend">Renvoyer l'e-mail de confirmation</button></div>
+            Votre adresse n'est pas confirmée. <button type="button" class="font-semibold underline" data-act="resend">Renvoyer le code</button></div>
         <form data-form="login" class="space-y-4" novalidate>
             <div><label for="login-email" class="block text-sm font-medium text-gray-700 mb-1">Adresse e-mail</label>
                 <input type="email" id="login-email" required autocomplete="email" class="field" placeholder="vous@exemple.com"></div>
@@ -248,7 +248,12 @@ async function onLogin(form) {
     setBusy(btn, false);
     if (!d.success) {
         showErr("login-error", d.message);
-        if (d.code === "email_not_verified") { $("#resend-box").classList.remove("hidden"); $("#resend-box").dataset.email = d.email || email; }
+        if (d.code === "email_not_verified") {
+            // Compte créé mais pas confirmé : on envoie l'utilisateur saisir son code (il peut en redemander un)
+            sessionStorage.setItem("pending-email", d.email || email);
+            sessionStorage.setItem("check-email", JSON.stringify({ email: d.email || email, message: "Saisissez le code reçu par e-mail, ou demandez-en un nouveau." }));
+            location.hash = "#/check-email";
+        }
         return;
     }
     state.csrf = d.csrf; state.user = d.user; state.unread = d.unread || 0; state.v = Date.now();
@@ -311,18 +316,48 @@ async function onRegister(form) {
     location.hash = "#/check-email";
 }
 
+// Page "Entrez votre code" : affichée juste après l'inscription (et quand on se connecte sans avoir confirmé)
 async function vCheckEmail() {
+    // Infos laissées par onRegister / onLogin dans sessionStorage
     let info = {}; try { info = JSON.parse(sessionStorage.getItem("check-email") || "{}"); } catch (e) {}
+    const email = info.email || sessionStorage.getItem("pending-email") || "";
     $("#view").innerHTML = authShell(`
         <div class="text-center space-y-4">
             <div class="mx-auto w-16 h-16 rounded-full bg-indigo-100 text-indigo-600 flex items-center justify-center text-2xl"><i class="fa-solid fa-envelope-circle-check"></i></div>
-            <h2 class="text-2xl font-bold text-gray-900">Vérifiez votre boîte mail</h2>
-            <p class="text-sm text-gray-600">${esc(info.message || "Un e-mail de confirmation a été préparé pour votre adresse.")}</p>
-            ${info.email ? `<p class="text-sm font-semibold text-gray-800">${esc(info.email)}</p>` : ""}
-            <p class="text-xs text-gray-500">Votre compte restera inactif tant que l'adresse n'est pas confirmée. Le lien est valable 24 heures.</p>
-            <div id="resend-box" data-email="${esc(info.email || "")}"><button class="btn btn-ghost" data-act="resend"><i class="fa-solid fa-rotate-right"></i> Renvoyer l'e-mail</button></div>
+            <h2 class="text-2xl font-bold text-gray-900">Entrez votre code</h2>
+            <p class="text-sm text-gray-600">${esc(info.message || "Un code à 6 chiffres vous a été envoyé par e-mail.")}</p>
+            ${email ? `<p class="text-sm font-semibold text-gray-800">${esc(email)}</p>` : ""}
+            ${errBox("code-error")}
+            <form data-form="verify-code" class="space-y-4" novalidate>
+                <input id="verify-code" class="field text-center text-2xl tracking-[0.5em] font-bold" inputmode="numeric"
+                       autocomplete="one-time-code" maxlength="6" placeholder="000000" aria-label="Code à 6 chiffres">
+                <button class="btn btn-primary w-full py-3" type="submit">Valider et accéder à l'accueil</button>
+            </form>
+            <p class="text-xs text-gray-500">Le code est valable 15 minutes.</p>
+            <p class="text-xs text-gray-500">Vous ne voyez pas l'e-mail ? Vérifiez votre dossier <strong>Spam</strong> ou <strong>Courrier indésirable</strong>.</p>
+            <div id="resend-box" data-email="${esc(email)}"><button class="btn btn-ghost" data-act="resend"><i class="fa-solid fa-rotate-right"></i> Renvoyer le code</button></div>
             <a href="#/login" class="block text-sm text-indigo-600 font-semibold hover:underline">Aller à la connexion</a>
         </div>`);
+    $("#verify-code")?.focus();   // curseur directement dans le champ
+}
+
+// Soumission du code : si OK, le serveur nous connecte et on va sur l'accueil
+async function onVerifyCode(form) {
+    hideErr("code-error");
+    const email = $("#resend-box")?.dataset.email || sessionStorage.getItem("pending-email") || "";
+    const code = $("#verify-code").value.replace(/\D/g, "");          // chiffres uniquement
+    if (code.length !== 6) return showErr("code-error", "Saisissez le code à 6 chiffres.");
+
+    const btn = $("button[type=submit]", form); setBusy(btn, true, "Vérification…");
+    const d = await api("verify_code", { method: "POST", body: { email, code } });
+    setBusy(btn, false);
+    if (!d.success) return showErr("code-error", d.message);
+
+    // Succès : on nettoie, on mémorise la session renvoyée par le serveur puis on redirige
+    sessionStorage.removeItem("check-email");
+    sessionStorage.removeItem("pending-email");
+    state.csrf = d.csrf; state.user = d.user; state.unread = d.unread || 0; state.v = Date.now();
+    location.hash = "#/" + (d.redirect || "feed");    // "#/feed" = page d'accueil
 }
 
 async function vVerify(r) {
@@ -856,8 +891,7 @@ document.addEventListener("submit", async (e) => {
     const form = e.target.closest("[data-form]");
     if (!form) return;
     e.preventDefault();
-    const handlers = { login: onLogin, register: onRegister, "post-create": onPostCreate, "post-edit": onPostEdit, "profile-edit": onProfileEdit, password: onPassword, verification: onVerification };
-    const name = form.dataset.form;
+    const handlers = { login: onLogin, register: onRegister, "verify-code": onVerifyCode, "post-create": onPostCreate, "post-edit": onPostEdit, "profile-edit": onProfileEdit, password: onPassword, verification: onVerification };    const name = form.dataset.form;
     if (handlers[name]) return handlers[name](form);
     const btn = $("button[type=submit]", form);
     if (name === "comment") {

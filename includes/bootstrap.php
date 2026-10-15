@@ -282,20 +282,49 @@ function mailer(): Mailer
 }
 
 /** Crée un jeton à usage unique (24 h) et envoie le lien. Retourne true si l'e-mail a été remis au serveur SMTP / écrit en log. */
+/**
+ * Génère un code de confirmation à 6 chiffres et l'envoie par e-mail.
+ *
+ * - Le code vient de random_int() (générateur cryptographiquement sûr, contrairement à rand()).
+ * - Il n'est JAMAIS stocké en clair : on enregistre seulement son hash SHA-256 (lié à l'id de
+ *   l'utilisateur), comme pour un mot de passe. Une fuite de la base ne révèle donc pas les codes.
+ * - Il est valable 15 minutes et à usage unique (colonne used_at).
+ * - La table email_tokens est réutilisée telle quelle (purpose = 'verify_email').
+ *
+ * Fonction appelée par act_register (inscription) et act_resend_verification (renvoi du code).
+ *
+ * @param array $user Doit contenir 'id', 'name' et 'email'
+ * @return bool true si l'e-mail a été remis au serveur SMTP (ou écrit dans mails.log en mode log)
+ */
 function send_verification_email(array $user): bool
 {
     $pdo = db();
-    $pdo->prepare('UPDATE email_tokens SET used_at = NOW() WHERE user_id = ? AND purpose = ? AND used_at IS NULL')->execute([$user['id'], 'verify_email']);
-    $token = bin2hex(random_bytes(32));
-    $pdo->prepare('INSERT INTO email_tokens (user_id, token_hash, purpose, expires_at) VALUES (?, ?, ?, NOW() + INTERVAL 24 HOUR)')
-        ->execute([$user['id'], hash('sha256', $token), 'verify_email']);
 
-    $link = rtrim((string)cfg('app_url', 'http://localhost:8000/'), '/') . '/index.html#/verify?token=' . $token;
-    $name = htmlspecialchars($user['name'], ENT_QUOTES, 'UTF-8');
-    $text = "Bonjour {$user['name']},\n\nPour activer votre compte CampusLink, confirmez votre adresse e-mail :\n$link\n\nCe lien est valable 24 heures et ne peut être utilisé qu'une fois.\nSi vous n'êtes pas à l'origine de cette inscription, ignorez ce message.";
-    $html = "<div style=\"font-family:Arial,sans-serif;max-width:480px;margin:auto\"><h2 style=\"color:#4f46e5\">CampusLink</h2><p>Bonjour $name,</p><p>Pour activer votre compte, confirmez votre adresse e-mail :</p><p><a href=\"$link\" style=\"background:#4f46e5;color:#fff;padding:12px 20px;border-radius:10px;text-decoration:none;display:inline-block\">Confirmer mon adresse e-mail</a></p><p style=\"color:#666;font-size:13px\">Ce lien est valable 24 heures et ne peut être utilisé qu'une fois. Si vous n'êtes pas à l'origine de cette inscription, ignorez ce message.</p></div>";
-    return mailer()->send($user['email'], 'Confirmez votre adresse e-mail - CampusLink', $text, $html);
-}
+    // 1) Invalider les anciens codes encore actifs : seul le DERNIER code envoyé est valide
+    $pdo->prepare('UPDATE email_tokens SET used_at = NOW() WHERE user_id = ? AND purpose = ? AND used_at IS NULL')
+        ->execute([$user['id'], 'verify_email']);
+
+    // 2) Générer le code : nombre aléatoire de 0 à 999999, complété par des zéros à gauche ("004217")
+    $code = str_pad((string)random_int(0, 999999), 6, '0', STR_PAD_LEFT);
+
+    // 3) Stocker le HASH du code (et non le code), avec une expiration à 15 minutes
+    $pdo->prepare('INSERT INTO email_tokens (user_id, token_hash, purpose, expires_at) VALUES (?, ?, ?, NOW() + INTERVAL 15 MINUTE)')
+        ->execute([$user['id'], hash('sha256', (int)$user['id'] . ':' . $code), 'verify_email']);
+
+    // 4) Construire le message. Le code DOIT être dans la version texte : en mode "log",
+    //    seul $text est écrit dans mails.log, c'est là que tu le liras en développement.
+    $name = htmlspecialchars($user['name'], ENT_QUOTES, 'UTF-8');   // évite l'injection HTML via le nom
+    $text = "Bonjour {$user['name']},\n\nVotre code de confirmation CampusLink est : $code\n\nCe code est valable 15 minutes et ne peut être utilisé qu'une fois.\nSi vous n'êtes pas à l'origine de cette inscription, ignorez ce message.";
+    $html = "<div style=\"font-family:Arial,sans-serif;max-width:480px;margin:auto\">"
+        . "<h2 style=\"color:#4f46e5\">CampusLink</h2>"
+        . "<p>Bonjour $name,</p>"
+        . "<p>Voici votre code de confirmation :</p>"
+        . "<p style=\"font-size:34px;font-weight:bold;letter-spacing:8px;text-align:center;background:#eef2ff;color:#4f46e5;padding:16px;border-radius:12px\">$code</p>"
+        . "<p style=\"color:#666;font-size:13px\">Ce code est valable 15 minutes et ne peut être utilisé qu'une fois. Si vous n'êtes pas à l'origine de cette inscription, ignorez ce message.</p>"
+        . "</div>";
+
+    // 5) Envoi (signature de ton Mailer : destinataire, sujet, texte, html)
+    return mailer()->send($user['email'], 'Confirmez votre inscription à CampusLink', $text, $html);}
 
 // ---------- Représentation publique d'un utilisateur ----------
 function user_public(array $u): array

@@ -32,7 +32,7 @@ $GET_ACTIONS = [
     'jobs', 'products', 'stats', 'admin_verifications', 'admin_companies',
 ];
 $POST_ACTIONS = [
-    'register', 'login', 'logout', 'verify_email', 'resend_verification',
+    'register', 'login', 'logout', 'verify_email', 'verify_code', 'resend_verification',
     'update_profile', 'avatar_set', 'avatar_delete', 'change_password', 'submit_verification',
     'post_create', 'post_update', 'post_delete', 'like_set', 'comment_add', 'comment_delete',
     'invite_send', 'invite_respond', 'invite_cancel', 'connection_remove',
@@ -176,13 +176,13 @@ function act_register(array $in): void
 
     $sent = send_verification_email(['id' => $id, 'name' => $displayName, 'email' => $email]);
     $real = mailer()->isReal();
-    if ($sent && $real) {
-        $msg = 'Compte créé. Un e-mail de confirmation vient de vous être envoyé : cliquez sur le lien pour activer votre compte.';
-    } elseif ($sent) {
-        $msg = 'Compte créé. MODE DÉVELOPPEMENT : aucun e-mail réel n\'a été envoyé ; le message est dans le fichier mails.log du dossier de stockage.';
-    } else {
-        $msg = 'Compte créé, mais l\'e-mail de confirmation n\'a pas pu être envoyé. Utilisez « Renvoyer l\'e-mail » depuis la page de connexion.';
-    }
+        if ($sent && $real) {
+            $msg = 'Compte créé. Un code de confirmation à 6 chiffres vient d\'être envoyé à votre adresse e-mail.';
+        } elseif ($sent) {
+            $msg = 'Compte créé. MODE DÉVELOPPEMENT : aucun e-mail réel n\'a été envoyé ; le code est dans le fichier mails.log du dossier de stockage.';
+        } else {
+            $msg = 'Compte créé, mais le code n\'a pas pu être envoyé. Utilisez « Renvoyer le code ».';
+        }
     json_out(['success' => true, 'message' => $msg, 'mail_sent' => $sent && $real, 'email' => $email], 201);
 }
 
@@ -218,6 +218,84 @@ function act_verify_email(array $in): void
     json_out(['success' => true, 'message' => 'Adresse e-mail confirmée. Vous pouvez maintenant vous connecter.']);
 }
 
+/**
+ * Vérifie le code à 6 chiffres saisi par l'utilisateur après son inscription.
+ * Si le code est bon : e-mail marqué vérifié + connexion automatique (session créée),
+ * le front redirige alors directement vers la page d'accueil.
+ */
+function act_verify_code(array $in): void
+{
+    // --- 1) Nettoyage et validation des entrées ---
+    $email = strtolower(trim((string)($in['email'] ?? '')));
+    $code = preg_replace('/\D/', '', (string)($in['code'] ?? ''));   // ne garde que les chiffres (tolère espaces/tirets)
+    if (!filter_var($email, FILTER_VALIDATE_EMAIL) || strlen($code) !== 6) {
+        fail('Saisissez le code à 6 chiffres reçu par e-mail.', 422);
+    }
+
+    // --- 2) Anti force brute ---
+    // Il n'existe que 1 000 000 de codes possibles : sans limite, un pirate les testerait tous.
+    // Ici : 5 échecs max par e-mail et 30 par IP, sur 15 minutes.
+    $ip = client_ip();
+    rate_guard('vcode_ip', $ip, 30, 900, 'Trop de tentatives. Réessayez dans 15 minutes.');
+    rate_guard('vcode_email', $email, 5, 900, 'Trop de tentatives. Demandez un nouveau code ou réessayez dans 15 minutes.');
+
+    // --- 3) Retrouver le compte ---
+    $pdo = db();
+    $st = $pdo->prepare('SELECT * FROM users WHERE email = ? AND is_active = 1');
+    $st->execute([$email]);
+    $u = $st->fetch();
+    if (!$u) {
+        // Même message qu'un mauvais code : on ne révèle pas si l'e-mail existe
+        rate_hit('vcode_ip', $ip);
+        rate_hit('vcode_email', $email);
+        fail('Code incorrect ou expiré.', 422);
+    }
+    if ($u['email_verified_at']) fail('Cette adresse est déjà confirmée. Connectez-vous.', 409);
+
+    // --- 4) Contrôler le code dans une transaction (évite qu'un même code serve deux fois) ---
+    $pdo->beginTransaction();
+    try {
+        // Dernier code non utilisé de cet utilisateur ; FOR UPDATE verrouille la ligne
+        $st = $pdo->prepare("SELECT id, token_hash, expires_at FROM email_tokens
+                             WHERE user_id = ? AND purpose = 'verify_email' AND used_at IS NULL
+                             ORDER BY id DESC LIMIT 1 FOR UPDATE");
+        $st->execute([$u['id']]);
+        $t = $st->fetch();
+
+        // Code absent, expiré, ou différent. hash_equals = comparaison à temps constant (anti timing attack)
+        if (!$t
+            || strtotime($t['expires_at']) < time()
+            || !hash_equals($t['token_hash'], hash('sha256', (int)$u['id'] . ':' . $code))) {
+            $pdo->rollBack();
+            rate_hit('vcode_ip', $ip);
+            rate_hit('vcode_email', $email);
+            fail('Code incorrect ou expiré.', 422);
+        }
+
+        // Code valide : on le consomme et on valide l'e-mail
+        $pdo->prepare('UPDATE email_tokens SET used_at = NOW() WHERE id = ?')->execute([$t['id']]);
+        $pdo->prepare('UPDATE users SET email_verified_at = NOW() WHERE id = ? AND email_verified_at IS NULL')->execute([$u['id']]);
+        $pdo->commit();
+    } catch (Throwable $e) {
+        if ($pdo->inTransaction()) $pdo->rollBack();
+        throw $e;
+    }
+
+    // --- 5) Connexion automatique (mêmes étapes que act_login) ---
+    session_regenerate_id(true);                         // contre la fixation de session
+    $_SESSION['uid'] = (int)$u['id'];
+    $_SESSION['sv'] = (int)$u['session_version'];
+    $_SESSION['csrf'] = bin2hex(random_bytes(32));
+
+    json_out([
+        'success' => true,
+        'csrf' => $_SESSION['csrf'],
+        'user' => me_payload($u),
+        'redirect' => in_array($u['role'], ['admin', 'moderator'], true) ? 'admin' : 'feed',   // 'feed' = page d'accueil
+        'unread' => unread_count((int)$u['id']),
+    ]);
+}
+
 function act_resend_verification(array $in): void
 {
     $email = strtolower(trim((string)($in['email'] ?? '')));
@@ -227,7 +305,7 @@ function act_resend_verification(array $in): void
     rate_hit('resend_ip', $ip);
     if ($email !== '') rate_hit('resend_email', $email);
 
-    $generic = 'Si un compte non vérifié existe pour cette adresse, un nouvel e-mail de confirmation vient d\'être envoyé.';
+    $generic = 'Si un compte non vérifié existe pour cette adresse, un nouveau code vient d\'être envoyé.';
     if (!filter_var($email, FILTER_VALIDATE_EMAIL)) json_out(['success' => true, 'message' => $generic]);
 
     $st = db()->prepare('SELECT * FROM users WHERE email = ? AND email_verified_at IS NULL AND is_active = 1');
