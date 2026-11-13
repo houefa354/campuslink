@@ -203,3 +203,68 @@ CREATE TABLE IF NOT EXISTS products (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
 ) ENGINE=InnoDB;
+
+
+-- ============================================================
+-- Messagerie (Chat) et Interactions Commentaires
+-- ============================================================
+
+-- Conversations privées 1-à-1
+CREATE TABLE IF NOT EXISTS conversations (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    user_low INT NOT NULL,
+    user_high INT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_low) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (user_high) REFERENCES users(id) ON DELETE CASCADE,
+    UNIQUE KEY uq_conv_pair (user_low, user_high),
+    INDEX idx_conv_user_low (user_low),
+    INDEX idx_conv_user_high (user_high),
+    INDEX idx_conv_updated (updated_at)
+) ENGINE=InnoDB;
+
+-- Messages des conversations
+CREATE TABLE IF NOT EXISTS messages (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    conversation_id INT NOT NULL,
+    sender_id INT NOT NULL,
+    content TEXT NOT NULL,
+    is_deleted TINYINT(1) NOT NULL DEFAULT 0,
+    read_at DATETIME NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+    FOREIGN KEY (sender_id) REFERENCES users(id) ON DELETE CASCADE,
+    INDEX idx_messages_conv (conversation_id, id),
+    INDEX idx_messages_sender (sender_id),
+    INDEX idx_messages_read (conversation_id, read_at)
+) ENGINE=InnoDB;
+
+-- Réactions aux commentaires
+CREATE TABLE IF NOT EXISTS comment_reactions (
+    comment_id INT NOT NULL,
+    user_id INT NOT NULL,
+    type ENUM('like', 'love', 'bravo', 'insightful') NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (comment_id, user_id),
+    FOREIGN KEY (comment_id) REFERENCES post_comments(id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    INDEX idx_reactions_type (comment_id, type)
+) ENGINE=InnoDB;
+
+-- Évolution de post_comments (parent_id)
+ALTER TABLE post_comments
+    ADD COLUMN IF NOT EXISTS parent_id INT NULL DEFAULT NULL AFTER user_id;
+
+-- Évolution de notifications (types supplémentaires)
+ALTER TABLE notifications
+    MODIFY COLUMN type ENUM(
+        'invitation_received',
+        'invitation_accepted',
+        'post_liked',
+        'post_commented',
+        'verification_update',
+        'message_received',
+        'comment_replied',
+        'comment_reacted'
+    ) NOT NULL;

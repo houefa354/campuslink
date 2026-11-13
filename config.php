@@ -34,9 +34,9 @@ return [
         'host'       => 'smtp.gmail.com',
         'port'       => 587,
         'encryption' => 'tls',          // 'tls' (STARTTLS, port 587) | 'ssl' (port 465) | 'none'
-        'username'   => 'kamaroudine151@gmail.com',
+        'username'   => 'campuslink40@gmail.com',
         'password'   => 'ewpzscarcklieqey',
-        'from_email' => 'kamaroudine151@gmail.com',
+        'from_email' => 'campuslink40@gmail.com',
         'from_name'  => 'CampusLink',
     ],
 ];

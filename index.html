@@ -31,7 +31,7 @@
 <script>
 "use strict";
 const API = "./api.php";
-const state = { user: null, csrf: "", unread: 0, mailMode: "log", v: Date.now() };
+const state = { user: null, csrf: "", unread: 0, unreadMessages: 0, mailMode: "log", v: Date.now() };
 
 // ------------------------------------------------------------------ utilitaires
 const $ = (s, r = document) => r.querySelector(s);
@@ -86,7 +86,7 @@ async function api(action, { method = "GET", body, form, params = {} } = {}, ret
 
 async function loadMe() {
     const d = await api("me");
-    if (d.success) { state.csrf = d.csrf; state.user = d.user; state.unread = d.unread || 0; state.mailMode = d.mail_mode; }
+    if (d.success) { state.csrf = d.csrf; state.user = d.user; state.unread = d.unread || 0; state.unreadMessages = d.unread_messages || 0; state.mailMode = d.mail_mode; }
     return d;
 }
 
@@ -131,16 +131,20 @@ function pwError(p) {
 // ------------------------------------------------------------------ navigation / layout
 const NAV = [
     ["feed", "fa-house", "Accueil"], ["people", "fa-user-group", "Réseau"], ["invitations", "fa-envelope-open-text", "Invitations"],
-    ["jobs", "fa-briefcase", "Offres"], ["market", "fa-store", "Marketplace"],
+    ["messages", "fa-comments", "Messages"], ["jobs", "fa-briefcase", "Offres"], ["market", "fa-store", "Marketplace"],
 ];
 
 function renderNav() {
     const nav = $("#nav"), bottom = $("#bottom-nav"), u = state.user;
     document.body.classList.toggle("pb-16", !!u);
-    if (!u) { nav.innerHTML = ""; bottom.innerHTML = ""; return; }   // pas de header sur connexion / inscription
+    if (!u) { nav.innerHTML = ""; bottom.innerHTML = ""; return; }
     const cur = currentRoute().name;
     const isAdmin = u.role === "admin";
-    const link = ([r, ic, t]) => `<a href="#/${r}" class="px-3 py-2 rounded-lg text-sm hover:bg-indigo-700 ${cur === r ? "bg-indigo-700" : ""}"><i class="fa-solid ${ic} mr-1"></i>${t}</a>`;
+    const link = ([r, ic, t]) => {
+        const isMsg = r === "messages";
+        const bHtml = isMsg ? `<span id="msg-nav-badge" class="${state.unreadMessages ? "" : "hidden"} ml-1.5 bg-amber-400 text-indigo-900 text-[10px] font-bold rounded-full min-w-[18px] h-[18px] inline-flex items-center justify-center px-1">${state.unreadMessages > 99 ? "99+" : state.unreadMessages}</span>` : "";
+        return `<a href="#/${r}" class="relative px-3 py-2 rounded-lg text-sm hover:bg-indigo-700 ${cur === r ? "bg-indigo-700" : ""}"><i class="fa-solid ${ic} mr-1"></i>${t}${bHtml}</a>`;
+    };
     nav.innerHTML = `<div class="bg-indigo-600 text-white shadow-md sticky top-0 z-50"><div class="max-w-6xl mx-auto px-4 flex justify-between items-center h-16">
         <a href="#/${isAdmin ? "admin" : "feed"}" class="font-bold text-xl sm:text-2xl flex items-center gap-2"><i class="fa-solid fa-graduation-cap text-amber-400"></i> CampusLink</a>
         <div class="hidden md:flex items-center gap-1 font-medium">${NAV.map(link).join("")}${isAdmin ? link(["admin", "fa-shield-halved", "Admin"]) : ""}</div>
@@ -152,20 +156,36 @@ function renderNav() {
                 <div id="user-menu" class="hidden absolute right-0 mt-2 w-56 bg-white text-gray-700 rounded-xl shadow-lg border overflow-hidden text-sm">
                     <div class="px-4 py-3 border-b"><p class="font-semibold truncate">${esc(u.name)}</p><p class="text-xs text-gray-500 truncate">${esc(u.email)}</p></div>
                     <a href="#/profile" class="block px-4 py-2.5 hover:bg-gray-50"><i class="fa-solid fa-user w-5"></i> Mon profil</a>
+                    <a href="#/messages" class="block px-4 py-2.5 hover:bg-gray-50"><i class="fa-solid fa-comments w-5"></i> Messages</a>
                     <a href="#/profile/edit" class="block px-4 py-2.5 hover:bg-gray-50"><i class="fa-solid fa-pen w-5"></i> Modifier mon profil</a>
                     <a href="#/security" class="block px-4 py-2.5 hover:bg-gray-50"><i class="fa-solid fa-lock w-5"></i> Sécurité</a>
                     <button data-act="logout" class="w-full text-left px-4 py-2.5 hover:bg-red-50 text-red-600"><i class="fa-solid fa-right-from-bracket w-5"></i> Déconnexion</button>
                 </div></div>
         </div></div></div>`;
-    const bItem = ([r, ic, t]) => `<a href="#/${r}" class="flex flex-col items-center justify-center flex-1 py-2 text-[11px] ${cur === r ? "text-indigo-600 font-semibold" : "text-gray-500"}"><i class="fa-solid ${ic} text-lg"></i>${t}</a>`;
-    bottom.innerHTML = `<div class="md:hidden fixed bottom-0 inset-x-0 bg-white border-t z-40 flex">${[NAV[0], NAV[1], NAV[2], NAV[3], ["profile", "fa-user", "Profil"]].map(bItem).join("")}</div>`;
+    const bItem = ([r, ic, t]) => {
+        const isMsg = r === "messages";
+        const bHtml = isMsg ? `<span id="msg-bottom-badge" class="${state.unreadMessages ? "" : "hidden"} absolute top-1 right-3 bg-amber-400 text-indigo-900 text-[10px] font-bold rounded-full min-w-[16px] h-[16px] inline-flex items-center justify-center px-1">${state.unreadMessages > 99 ? "99+" : state.unreadMessages}</span>` : "";
+        return `<a href="#/${r}" class="relative flex flex-col items-center justify-center flex-1 py-2 text-[11px] ${cur === r ? "text-indigo-600 font-semibold" : "text-gray-500"}"><i class="fa-solid ${ic} text-lg"></i>${t}${bHtml}</a>`;
+    };
+    bottom.innerHTML = `<div class="md:hidden fixed bottom-0 inset-x-0 bg-white border-t z-40 flex">${[NAV[0], NAV[1], ["messages", "fa-comments", "Messages"], NAV[4], ["profile", "fa-user", "Profil"]].map(bItem).join("")}</div>`;
 }
 
 function updateBadge() {
     const b = $("#notif-badge");
-    if (!b) return;
-    b.textContent = state.unread > 99 ? "99+" : state.unread;
-    b.classList.toggle("hidden", !state.unread);
+    if (b) {
+        b.textContent = state.unread > 99 ? "99+" : state.unread;
+        b.classList.toggle("hidden", !state.unread);
+    }
+    const mb = $("#msg-nav-badge");
+    if (mb) {
+        mb.textContent = state.unreadMessages > 99 ? "99+" : state.unreadMessages;
+        mb.classList.toggle("hidden", !state.unreadMessages);
+    }
+    const mbb = $("#msg-bottom-badge");
+    if (mbb) {
+        mbb.textContent = state.unreadMessages > 99 ? "99+" : state.unreadMessages;
+        mbb.classList.toggle("hidden", !state.unreadMessages);
+    }
 }
 
 function currentRoute() {
@@ -213,7 +233,7 @@ async function route() {
     const views = {
         login: vLogin, register: vRegister, verify: vVerify, "check-email": vCheckEmail,
         feed: vFeed, people: vPeople, invitations: vInvitations, notifications: vNotifications, profile: vProfile,
-        security: vSecurity, jobs: vJobs, market: vMarket, admin: vAdmin,
+        security: vSecurity, jobs: vJobs, market: vMarket, admin: vAdmin, messages: vMessages,
     };
     const fn = views[r.name];
     if (!fn) { view.innerHTML = `<div class="card p-8 text-center">Page introuvable. <a class="text-indigo-600 font-semibold" href="#/feed">Retour</a></div>`; return; }
@@ -458,20 +478,111 @@ async function toggleComments(id) {
     await renderComments(id);
 }
 
+const COMMENT_REACTIONS = [
+    { type: "like", label: "J'aime", emoji: "👍" },
+    { type: "love", label: "J'adore", emoji: "❤️" },
+    { type: "bravo", label: "Bravo", emoji: "👏" },
+    { type: "insightful", label: "Intéressant", emoji: "💡" },
+];
+
+function commentHTML(cm, postId, isReply = false) {
+    const rx = cm.reactions || { like: 0, love: 0, bravo: 0, insightful: 0 };
+    const myR = cm.my_reaction;
+    const rxBtns = COMMENT_REACTIONS.map(r => {
+        const count = rx[r.type] || 0;
+        const active = myR === r.type;
+        return `<button type="button" data-act="comment-react" data-id="${cm.id}" data-type="${r.type}" data-post="${postId}"
+            class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-xs transition ${active ? "bg-indigo-100 text-indigo-700 font-bold ring-1 ring-indigo-400" : "text-gray-500 hover:bg-gray-200"}"
+            title="${r.label}">
+            <span>${r.emoji}</span>${count > 0 ? `<span class="text-[11px] font-semibold">${count}</span>` : ""}
+        </button>`;
+    }).join("");
+
+    return `
+        <div class="flex gap-2.5 ${isReply ? "text-xs" : ""}" data-comment-item="${cm.id}">
+            <a href="#/profile/${cm.user_id}" class="shrink-0">${avatar(cm.user_id, cm.author, cm.has_avatar, "sm")}</a>
+            <div class="flex-1 bg-gray-50 rounded-xl px-3 py-2 min-w-0">
+                <div class="flex justify-between items-start gap-2">
+                    <a href="#/profile/${cm.user_id}" class="text-sm font-semibold hover:text-indigo-600 truncate">${esc(cm.author)}</a>
+                    <span class="text-[11px] text-gray-400 shrink-0">
+                        ${fmtDate(cm.created_at)}
+                        ${cm.can_delete ? `<button type="button" data-act="comment-delete" data-id="${cm.id}" data-post="${postId}" class="ml-1.5 text-red-500 hover:text-red-700" aria-label="Supprimer"><i class="fa-solid fa-trash-can"></i></button>` : ""}
+                    </span>
+                </div>
+                <p class="text-sm text-gray-700 whitespace-pre-wrap break-words mt-0.5">${esc(cm.content)}</p>
+                <div class="flex items-center gap-2 mt-2 pt-1 border-t border-gray-200/60 flex-wrap">
+                    <div class="flex items-center gap-1">${rxBtns}</div>
+                    ${!isReply ? `<button type="button" data-act="open-reply" data-id="${cm.id}" class="text-xs text-indigo-600 font-semibold hover:underline ml-1"><i class="fa-solid fa-reply mr-1"></i>Répondre</button>` : ""}
+                </div>
+            </div>
+        </div>
+    `;
+}
+
 async function renderComments(id) {
     const art = $(`[data-post="${id}"]`); if (!art) return;
     const box = $("[data-comments]", art);
     box.innerHTML = `<div class="text-center py-3 text-gray-400 text-sm"><i class="fa-solid fa-circle-notch fa-spin"></i></div>`;
     const d = await api("comments", { params: { post_id: id } });
     if (!d.success) { box.innerHTML = `<p class="text-sm text-red-600">${esc(d.message)}</p>`; return; }
-    const c = $("[data-ccount]", art); if (c) c.textContent = d.comments.length;
-    box.innerHTML = `<div class="space-y-3">${d.comments.map(cm => `
-        <div class="flex gap-2.5">${avatar(cm.user_id, cm.author, cm.has_avatar, "sm")}
-            <div class="flex-1 bg-gray-50 rounded-xl px-3 py-2 min-w-0">
-                <div class="flex justify-between items-start gap-2"><a href="#/profile/${cm.user_id}" class="text-sm font-semibold hover:text-indigo-600">${esc(cm.author)}</a>
-                    <span class="text-[11px] text-gray-400 shrink-0">${fmtDate(cm.created_at)}${cm.can_delete ? ` <button data-act="comment-delete" data-id="${cm.id}" data-post="${id}" class="ml-1 text-red-500 hover:text-red-700" aria-label="Supprimer le commentaire"><i class="fa-solid fa-trash-can"></i></button>` : ""}</span></div>
-                <p class="text-sm text-gray-700 whitespace-pre-wrap break-words">${esc(cm.content)}</p></div></div>`).join("") || `<p class="text-sm text-gray-400">Aucun commentaire.</p>`}</div>
-        <form data-form="comment" data-id="${id}" class="flex gap-2 mt-3"><input class="field !py-2" maxlength="1000" placeholder="Écrire un commentaire…" aria-label="Commentaire" required><button class="btn btn-primary" type="submit" aria-label="Envoyer"><i class="fa-solid fa-paper-plane"></i></button></form>`;
+
+    const c = $("[data-ccount]", art);
+    if (c) c.textContent = d.comments.length;
+
+    // Séparer commentaires racines et réponses (1 seul niveau)
+    const roots = d.comments.filter(cm => !cm.parent_id);
+    const repliesMap = {};
+    d.comments.forEach(cm => {
+        if (cm.parent_id) {
+            if (!repliesMap[cm.parent_id]) repliesMap[cm.parent_id] = [];
+            repliesMap[cm.parent_id].push(cm);
+        }
+    });
+
+    if (!roots.length) {
+        box.innerHTML = `
+            <p class="text-sm text-gray-400 py-1">Aucun commentaire pour le moment.</p>
+            <form data-form="comment" data-id="${id}" class="flex gap-2 mt-3">
+                <input class="field !py-2" maxlength="1000" placeholder="Écrire un commentaire…" aria-label="Commentaire" required>
+                <button class="btn btn-primary" type="submit" aria-label="Envoyer"><i class="fa-solid fa-paper-plane"></i></button>
+            </form>
+        `;
+        return;
+    }
+
+    const html = roots.map(root => {
+        const replies = repliesMap[root.id] || [];
+        const hasReplies = replies.length > 0;
+        return `
+            <div class="space-y-2" data-comment-block="${root.id}">
+                ${commentHTML(root, id, false)}
+                ${hasReplies ? `
+                    <div class="ml-10">
+                        <button type="button" data-act="toggle-replies" data-id="${root.id}" class="text-xs text-indigo-600 font-semibold hover:underline flex items-center gap-1 mb-1">
+                            <i class="fa-solid fa-chevron-down text-[10px]"></i>
+                            <span>Afficher les réponses (${replies.length})</span>
+                        </button>
+                        <div id="replies-${root.id}" class="hidden space-y-2 border-l-2 border-indigo-100 pl-3">
+                            ${replies.map(r => commentHTML(r, id, true)).join("")}
+                        </div>
+                    </div>
+                ` : ""}
+                <form data-form="comment-reply" data-post="${id}" data-parent="${root.id}" class="hidden ml-10 flex gap-2 mt-2">
+                    <input class="field !py-1.5 text-xs" maxlength="1000" placeholder="Répondre à ${esc(root.author)}…" required aria-label="Votre réponse">
+                    <button class="btn btn-primary !py-1.5 !px-3 text-xs" type="submit"><i class="fa-solid fa-paper-plane"></i></button>
+                    <button type="button" data-act="close-reply" data-id="${root.id}" class="btn btn-ghost !py-1.5 !px-2 text-xs">Annuler</button>
+                </form>
+            </div>
+        `;
+    }).join("");
+
+    box.innerHTML = `
+        <div class="space-y-3">${html}</div>
+        <form data-form="comment" data-id="${id}" class="flex gap-2 mt-3">
+            <input class="field !py-2" maxlength="1000" placeholder="Écrire un commentaire…" aria-label="Commentaire" required>
+            <button class="btn btn-primary" type="submit" aria-label="Envoyer"><i class="fa-solid fa-paper-plane"></i></button>
+        </form>
+    `;
 }
 
 async function onPostCreate(form) {
@@ -568,7 +679,7 @@ function connButton(id, c, role) {
     if (!c || !["student", "company"].includes(role) || !["student", "company"].includes(state.user.role)) return "";
     if (state.user.role === "company" && role === "company") return "";
     switch (c.state) {
-        case "connected": return `<span class="btn btn-ghost !cursor-default text-green-700"><i class="fa-solid fa-user-check"></i> En relation</span>`;
+        case "connected": return `<a href="#/messages/${id}" class="btn btn-primary"><i class="fa-solid fa-comments"></i> Envoyer un message</a><span class="btn btn-ghost !cursor-default text-green-700"><i class="fa-solid fa-user-check"></i> En relation</span>`;
         case "sent": return `<button class="btn btn-ghost" data-act="invite-cancel" data-id="${c.id}"><i class="fa-solid fa-xmark"></i> Annuler l'invitation</button>`;
         case "received": return `<button class="btn btn-green" data-act="invite-accept" data-id="${c.id}"><i class="fa-solid fa-check"></i> Accepter</button><button class="btn btn-ghost" data-act="invite-decline" data-id="${c.id}">Refuser</button>`;
         case "declined": return `<span class="btn btn-ghost !cursor-default text-gray-500">Invitation refusée</span>`;
@@ -730,13 +841,13 @@ async function vInvitations() {
     $("#view").innerHTML = `<div class="max-w-3xl mx-auto space-y-6"><h1 class="text-2xl font-bold text-gray-900">Invitations</h1>
         ${sec("Invitations reçues en attente", "fa-inbox", d.received, "Aucune invitation en attente.", i => personCard({ ...i, id: i.user_id }, `<button class="btn btn-green" data-act="invite-accept" data-id="${i.id}"><i class="fa-solid fa-check"></i> Accepter</button><button class="btn btn-ghost" data-act="invite-decline" data-id="${i.id}">Refuser</button>`))}
         ${sec("Invitations envoyées", "fa-paper-plane", d.sent, "Aucune invitation envoyée en attente.", i => personCard({ ...i, id: i.user_id }, `<span class="chip bg-amber-100 text-amber-700 self-center">En attente</span><button class="btn btn-ghost" data-act="invite-cancel" data-id="${i.id}">Annuler</button>`))}
-        ${sec("Mes relations", "fa-user-group", d.friends, "Pas encore de relation. <a class='text-indigo-600 font-semibold' href='#/people'>Trouver des personnes</a>", i => personCard({ ...i, id: i.user_id }, `<button class="btn btn-ghost text-red-600" data-act="connection-remove" data-id="${i.id}" aria-label="Supprimer la relation"><i class="fa-solid fa-user-minus"></i></button>`))}
+        ${sec("Mes relations", "fa-user-group", d.friends, "Pas encore de relation. <a class='text-indigo-600 font-semibold' href='#/people'>Trouver des personnes</a>", i => personCard({ ...i, id: i.user_id }, `<a href="#/messages/${i.user_id}" class="btn btn-primary !py-1 !px-2.5 text-xs"><i class="fa-solid fa-comments"></i> Message</a><button class="btn btn-ghost text-red-600 !py-1 !px-2" data-act="connection-remove" data-id="${i.id}" aria-label="Supprimer la relation"><i class="fa-solid fa-user-minus"></i></button>`))}
     </div>`;
 }
 
 // ------------------------------------------------------------------ notifications
-const NOTIF_ICON = { invitation_received: "fa-user-plus text-indigo-500", invitation_accepted: "fa-user-check text-green-600", post_liked: "fa-thumbs-up text-indigo-500", post_commented: "fa-comment text-amber-500", verification_update: "fa-shield-halved text-emerald-600" };
-const NOTIF_LINK = { invitation_received: "#/invitations", invitation_accepted: "#/invitations", post_liked: "#/feed", post_commented: "#/feed", verification_update: "#/profile" };
+const NOTIF_ICON = { invitation_received: "fa-user-plus text-indigo-500", invitation_accepted: "fa-user-check text-green-600", post_liked: "fa-thumbs-up text-indigo-500", post_commented: "fa-comment text-amber-500", verification_update: "fa-shield-halved text-emerald-600", message_received: "fa-comments text-indigo-600", comment_replied: "fa-reply text-purple-600", comment_reacted: "fa-heart text-pink-600" };
+const NOTIF_LINK = { invitation_received: "#/invitations", invitation_accepted: "#/invitations", post_liked: "#/feed", post_commented: "#/feed", verification_update: "#/profile", message_received: "#/messages", comment_replied: "#/feed", comment_reacted: "#/feed" };
 async function vNotifications() {
     const d = await api("notifications");
     if (!d.success) { $("#view").innerHTML = `<div class="card p-8 text-center">${esc(d.message)}</div>`; return; }
@@ -827,6 +938,380 @@ function verifCard(v) {
             <button class="btn btn-red" type="submit">Confirmer le refus</button></form></article>`;
 }
 
+
+// ------------------------------------------------------------------ messagerie (chat)
+let chatPollingTimer = null;
+let activeChatConv = 0;
+let activeChatOtherId = 0;
+let lastChatMsgId = 0;
+let convCache = [];
+let friendsCache = [];
+
+function stopChatPolling() {
+    if (chatPollingTimer) {
+        clearInterval(chatPollingTimer);
+        chatPollingTimer = null;
+    }
+}
+
+async function vMessages(r) {
+    stopChatPolling();
+    activeChatConv = 0;
+    activeChatOtherId = 0;
+    lastChatMsgId = 0;
+    const targetParam = +r.sub || 0;
+
+    $("#view").innerHTML = `
+        <div class="max-w-5xl mx-auto space-y-4">
+            <div class="flex items-center justify-between">
+                <h1 class="text-2xl font-bold text-gray-900 flex items-center gap-2">
+                    <i class="fa-solid fa-comments text-indigo-600"></i> Messagerie
+                </h1>
+            </div>
+            <div class="card overflow-hidden grid grid-cols-1 md:grid-cols-12 min-h-[550px] max-h-[750px] h-[75vh]">
+                <!-- Colonne conversations & contacts -->
+                <div id="chat-conv-col" class="md:col-span-5 lg:col-span-4 border-r border-gray-200 flex flex-col h-full bg-gray-50/50 ${targetParam ? "hidden md:flex" : "flex"}">
+                    <div class="p-3 border-b bg-white flex items-center justify-between">
+                        <span class="font-bold text-sm text-gray-700">Discussions</span>
+                        <a href="#/people" class="text-xs text-indigo-600 font-semibold hover:underline flex items-center gap-1">
+                            <i class="fa-solid fa-user-plus"></i> Trouver des contacts
+                        </a>
+                    </div>
+                    <div id="conv-list" class="flex-1 overflow-y-auto divide-y divide-gray-100">
+                        ${spinner("Chargement des contacts…")}
+                    </div>
+                </div>
+
+                <!-- Colonne conversation active -->
+                <div id="chat-msg-col" class="md:col-span-7 lg:col-span-8 flex flex-col h-full bg-white ${targetParam ? "flex" : "hidden md:flex"}">
+                    <div id="chat-header" class="p-3.5 border-b flex items-center justify-between bg-white shrink-0">
+                        <div class="text-gray-400 text-sm italic">Sélectionnez une discussion</div>
+                    </div>
+                    <div id="chat-messages" class="flex-1 overflow-y-auto p-4 space-y-3 bg-gray-50/30">
+                        <div class="h-full flex flex-col items-center justify-center text-gray-400 text-sm gap-2">
+                            <i class="fa-regular fa-comment-dots text-4xl text-gray-300"></i>
+                            <span>Sélectionnez un contact pour commencer à discuter.</span>
+                        </div>
+                    </div>
+                    <form id="chat-form" data-form="chat-send" class="p-3 border-t bg-white flex items-center gap-2 shrink-0 hidden">
+                        <input type="text" id="chat-input" maxlength="2000" required autocomplete="off" placeholder="Écrire un message…" class="field !py-2 flex-1" aria-label="Votre message">
+                        <button class="btn btn-primary !px-4" type="submit" aria-label="Envoyer"><i class="fa-solid fa-paper-plane"></i></button>
+                    </form>
+                </div>
+            </div>
+        </div>
+    `;
+
+    await loadConversations(targetParam);
+}
+
+async function loadConversations(openTargetId = 0) {
+    const list = $("#conv-list");
+    if (!list) return;
+
+    // Charger les conversations et les relations en parallèle
+    const [dConv, dConn] = await Promise.all([api("conversations"), api("connections")]);
+
+    if (!dConv.success) {
+        list.innerHTML = `<p class="p-4 text-xs text-red-600 text-center">${esc(dConv.message)}</p>`;
+        return;
+    }
+
+    convCache = dConv.conversations || [];
+    friendsCache = (dConn.success && dConn.friends) ? dConn.friends : [];
+
+    renderConvList();
+
+    if (openTargetId > 0) {
+        // Est-ce un conversation_id existant ?
+        const byConv = convCache.find(c => c.conversation_id === openTargetId);
+        if (byConv) {
+            await openChat(byConv.conversation_id, byConv.other_id);
+            return;
+        }
+        // Est-ce un other_id existant ?
+        const byUser = convCache.find(c => c.other_id === openTargetId);
+        if (byUser) {
+            await openChat(byUser.conversation_id, byUser.other_id);
+            return;
+        }
+        // Est-ce un ami dans mes relations ?
+        const byFriend = friendsCache.find(f => f.user_id === openTargetId);
+        if (byFriend) {
+            await openChat(0, byFriend.user_id);
+            return;
+        }
+        // Tenter d'ouvrir avec cet user_id
+        await openChat(0, openTargetId);
+    } else if (convCache.length > 0 && window.innerWidth >= 768) {
+        // Sur desktop, ouvrir la première conversation
+        await openChat(convCache[0].conversation_id, convCache[0].other_id);
+    } else if (friendsCache.length > 0 && window.innerWidth >= 768) {
+        // Si aucune conversation mais des contacts acceptés, ouvrir avec le premier contact
+        await openChat(0, friendsCache[0].user_id);
+    }
+}
+
+function renderConvList() {
+    const list = $("#conv-list");
+    if (!list) return;
+
+    let html = "";
+
+    // 1. Discussions existantes
+    if (convCache.length > 0) {
+        html += convCache.map(c => `
+            <button type="button" data-act="open-chat" data-conv="${c.conversation_id}" data-uid="${c.other_id}"
+                class="w-full text-left p-3 flex gap-3 hover:bg-gray-100 transition ${c.conversation_id === activeChatConv ? "bg-indigo-50/80 border-l-4 border-indigo-600" : ""}">
+                ${avatar(c.other_id, c.other_name, c.has_avatar, "md")}
+                <div class="flex-1 min-w-0">
+                    <div class="flex items-center justify-between gap-1">
+                        <span class="font-semibold text-sm text-gray-900 truncate">${esc(c.other_name)}</span>
+                        <span class="text-[10px] text-gray-400 shrink-0">${c.last_message_at ? fmtDate(c.last_message_at) : ""}</span>
+                    </div>
+                    <div class="flex items-center justify-between gap-1 mt-0.5">
+                        <p class="text-xs text-gray-500 truncate">${c.last_content ? esc(c.last_content) : "Nouvelle discussion"}</p>
+                        ${c.unread_count > 0 ? `<span class="bg-indigo-600 text-white text-[10px] font-bold rounded-full min-w-[18px] h-[18px] flex items-center justify-center px-1 shrink-0">${c.unread_count}</span>` : ""}
+                    </div>
+                </div>
+            </button>
+        `).join("");
+    }
+
+    // 2. Contacts acceptés avec qui aucune conversation n'a encore été démarrée
+    const convOtherIds = convCache.map(c => c.other_id);
+    const newContacts = friendsCache.filter(f => !convOtherIds.includes(f.user_id));
+
+    if (newContacts.length > 0) {
+        html += `<div class="px-3 py-2 bg-gray-100 text-gray-500 font-bold text-[11px] uppercase tracking-wider">Contacts disponibles</div>`;
+        html += newContacts.map(f => `
+            <button type="button" data-act="open-chat" data-conv="0" data-uid="${f.user_id}"
+                class="w-full text-left p-3 flex items-center gap-3 hover:bg-indigo-50/60 transition ${activeChatOtherId === f.user_id ? "bg-indigo-50/80 border-l-4 border-indigo-600" : ""}">
+                ${avatar(f.user_id, f.name, f.has_avatar, "sm")}
+                <div class="flex-1 min-w-0">
+                    <div class="flex items-center gap-1">
+                        <span class="font-semibold text-xs text-gray-900 truncate">${esc(f.name)}</span>
+                        ${f.verified ? verifiedBadge() : ""}
+                    </div>
+                    <span class="text-[10px] text-indigo-600 font-medium">Démarrer une discussion</span>
+                </div>
+                <i class="fa-solid fa-comment-dots text-indigo-400 text-xs"></i>
+            </button>
+        `).join("");
+    }
+
+    // Si ni conversation ni contact accepté
+    if (!convCache.length && !newContacts.length) {
+        html = `
+            <div class="p-6 text-center space-y-3 text-gray-500">
+                <i class="fa-solid fa-user-group text-3xl text-gray-300"></i>
+                <p class="text-xs">Vous n'avez pas encore de relation acceptée.<br>Connectez-vous avec des étudiants ou des entreprises pour échanger des messages privés.</p>
+                <a href="#/people" class="btn btn-primary !py-1.5 !px-3 text-xs inline-flex"><i class="fa-solid fa-user-plus mr-1"></i>Trouver des contacts</a>
+            </div>
+        `;
+    }
+
+    list.innerHTML = html;
+}
+
+async function openChat(convId, otherId) {
+    activeChatConv = convId;
+    activeChatOtherId = otherId;
+    stopChatPolling();
+
+    // Responsive : basculer l'affichage sur mobile
+    const convCol = $("#chat-conv-col"), msgCol = $("#chat-msg-col");
+    if (convCol && msgCol) {
+        convCol.classList.add("hidden");
+        convCol.classList.remove("flex");
+        msgCol.classList.remove("hidden");
+        msgCol.classList.add("flex");
+    }
+
+    renderConvList();
+
+    const header = $("#chat-header");
+    const msgBox = $("#chat-messages");
+    const form = $("#chat-form");
+    if (msgBox) msgBox.innerHTML = spinner("Chargement des messages…");
+
+    const params = {};
+    if (convId > 0) params.conversation_id = convId;
+    if (otherId > 0) params.user_id = otherId;
+
+    const d = await api("messages", { params });
+    if (!d.success) {
+        if (msgBox) msgBox.innerHTML = `
+            <div class="p-6 text-center space-y-2">
+                <div class="text-red-600 text-sm font-semibold">${esc(d.message)}</div>
+                <p class="text-xs text-gray-400">Pour échanger des messages, vous devez être en relation acceptée.</p>
+            </div>
+        `;
+        if (form) form.classList.add("hidden");
+        return;
+    }
+
+    activeChatConv = d.conversation_id;
+    activeChatOtherId = d.other.id;
+
+    if (header) {
+        header.innerHTML = `
+            <div class="flex items-center gap-3 min-w-0">
+                <button type="button" data-act="chat-back" class="md:hidden text-gray-500 hover:text-indigo-600 text-lg mr-1" aria-label="Retour aux discussions">
+                    <i class="fa-solid fa-arrow-left"></i>
+                </button>
+                <a href="#/profile/${d.other.id}" class="shrink-0">${avatar(d.other.id, d.other.name, d.other.has_avatar, "sm")}</a>
+                <div class="min-w-0">
+                    <div class="flex items-center gap-1.5 flex-wrap">
+                        <a href="#/profile/${d.other.id}" class="font-bold text-gray-900 text-sm hover:text-indigo-600 truncate">${esc(d.other.name)}</a>
+                        ${d.other.verified ? verifiedBadge() : ""}
+                    </div>
+                    <p class="text-[11px] text-gray-400">${roleChip(d.other.role)}</p>
+                </div>
+            </div>
+            <a href="#/profile/${d.other.id}" class="btn btn-ghost !py-1 !px-2.5 text-xs text-indigo-600">Voir profil</a>
+        `;
+    }
+
+    if (form) form.classList.remove("hidden");
+    renderMessagesList(d.messages);
+    $("#chat-input")?.focus();
+
+    if (d.messages && d.messages.length) {
+        lastChatMsgId = Math.max(...d.messages.map(m => m.id));
+    } else {
+        lastChatMsgId = 0;
+    }
+
+    const cItem = convCache.find(c => c.conversation_id === activeChatConv);
+    if (cItem && cItem.unread_count > 0) {
+        state.unreadMessages = Math.max(0, state.unreadMessages - cItem.unread_count);
+        cItem.unread_count = 0;
+        updateBadge();
+        renderConvList();
+    }
+
+    chatPollingTimer = setInterval(async () => {
+        if (document.hidden || !activeChatConv) return;
+        await pollNewMessages();
+    }, 4000);
+}
+
+function renderMessagesList(messages) {
+    const msgBox = $("#chat-messages");
+    if (!msgBox) return;
+
+    if (!messages || !messages.length) {
+        msgBox.innerHTML = `
+            <div class="h-full flex flex-col items-center justify-center text-gray-400 text-xs py-8">
+                <i class="fa-regular fa-comment-dots text-3xl mb-2 text-gray-300"></i>
+                <span>Aucun message pour le moment. Envoyez le premier mot !</span>
+            </div>
+        `;
+        return;
+    }
+
+    msgBox.innerHTML = messages.map(m => chatBubbleHTML(m)).join("");
+    msgBox.scrollTop = msgBox.scrollHeight;
+}
+
+function chatBubbleHTML(m) {
+    const isMe = m.is_me;
+    if (m.is_deleted) {
+        return `
+            <div class="flex ${isMe ? "justify-end" : "justify-start"} my-1.5" data-msg-id="${m.id}">
+                <div class="max-w-[78%] px-3.5 py-2 rounded-2xl text-xs bg-gray-100 text-gray-400 italic flex items-center gap-1.5">
+                    <i class="fa-solid fa-ban text-[10px]"></i> Ce message a été supprimé
+                </div>
+            </div>
+        `;
+    }
+
+    return `
+        <div class="flex ${isMe ? "justify-end" : "justify-start"} my-1.5 group" data-msg-id="${m.id}">
+            <div class="max-w-[78%] rounded-2xl px-3.5 py-2 text-sm shadow-sm ${isMe ? "bg-indigo-600 text-white rounded-br-sm" : "bg-gray-100 text-gray-800 rounded-bl-sm"}">
+                <p class="whitespace-pre-wrap break-words leading-relaxed">${esc(m.content)}</p>
+                <div class="flex items-center justify-end gap-1.5 mt-1 text-[10px] ${isMe ? "text-indigo-200" : "text-gray-400"}">
+                    <span>${fmtDate(m.created_at)}</span>
+                    ${isMe ? (m.read_at ? `<i class="fa-solid fa-check-double text-emerald-300" title="Lu"></i>` : `<i class="fa-solid fa-check" title="Envoyé"></i>`) : ""}
+                    ${isMe ? `<button type="button" data-act="msg-delete" data-id="${m.id}" class="opacity-0 group-hover:opacity-100 transition ml-1 text-red-200 hover:text-red-100" title="Supprimer ce message"><i class="fa-solid fa-trash-can"></i></button>` : ""}
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+async function pollNewMessages() {
+    if (!activeChatConv || !lastChatMsgId) return;
+    const d = await api("messages", { params: { conversation_id: activeChatConv, after_id: lastChatMsgId } });
+    if (!d.success || !d.messages || !d.messages.length) return;
+
+    const msgBox = $("#chat-messages");
+    if (!msgBox) return;
+
+    // Ajouter les nouveaux messages
+    for (const m of d.messages) {
+        if (m.id > lastChatMsgId) {
+            msgBox.insertAdjacentHTML("beforeend", chatBubbleHTML(m));
+            lastChatMsgId = m.id;
+        }
+    }
+    msgBox.scrollTop = msgBox.scrollHeight;
+
+    // Mettre à jour l'aperçu du dernier message dans la liste à gauche
+    const lastM = d.messages[d.messages.length - 1];
+    const cItem = convCache.find(c => c.conversation_id === activeChatConv);
+    if (cItem) {
+        cItem.last_content = lastM.is_deleted ? "Message supprimé" : lastM.content;
+        cItem.last_message_at = lastM.created_at;
+        renderConvList();
+    }
+}
+
+async function onChatSend(form) {
+    const input = $("#chat-input");
+    const content = input.value.trim();
+    if (!content) return;
+
+    const btn = $("button[type=submit]", form);
+    setBusy(btn, true, "");
+
+    const d = await api("message_send", {
+        method: "POST",
+        body: {
+            conversation_id: activeChatConv,
+            user_id: activeChatOtherId,
+            content: content
+        }
+    });
+
+    setBusy(btn, false);
+    if (!d.success) return toast(d.message, "error");
+
+    input.value = "";
+    activeChatConv = d.conversation_id;
+
+    // Récupérer immédiatement les nouveaux messages
+    const r = await api("messages", { params: { conversation_id: activeChatConv, after_id: lastChatMsgId } });
+    if (r.success && r.messages) {
+        const msgBox = $("#chat-messages");
+        for (const m of r.messages) {
+            if (m.id > lastChatMsgId) {
+                msgBox.insertAdjacentHTML("beforeend", chatBubbleHTML(m));
+                lastChatMsgId = m.id;
+            }
+        }
+        if (msgBox) msgBox.scrollTop = msgBox.scrollHeight;
+    }
+
+    // Recharger la liste des conversations pour mettre à jour l'ordre
+    const cRes = await api("conversations");
+    if (cRes.success) {
+        convCache = cRes.conversations || [];
+        renderConvList();
+    }
+}
+
 // ------------------------------------------------------------------ gestionnaires d'événements (délégation)
 document.addEventListener("click", async (e) => {
     const pw = e.target.closest("[data-toggle-pw]");
@@ -850,6 +1335,66 @@ document.addEventListener("click", async (e) => {
         return d;
     };
     switch (act) {
+        case "open-chat": {
+            const conv = +el.dataset.conv || 0, uid = +el.dataset.uid || 0;
+            openChat(conv, uid);
+            break;
+        }
+        case "chat-back": {
+            const convCol = $("#chat-conv-col"), msgCol = $("#chat-msg-col");
+            if (convCol && msgCol) {
+                convCol.classList.remove("hidden");
+                convCol.classList.add("flex");
+                msgCol.classList.add("hidden");
+                msgCol.classList.remove("flex");
+            }
+            break;
+        }
+        case "msg-delete": {
+            if (confirm("Supprimer ce message ?")) {
+                const d = await run("message_delete", { id });
+                if (d.success) {
+                    const row = $(`[data-msg-id="${id}"]`);
+                    if (row) row.outerHTML = chatBubbleHTML({ id, is_me: true, is_deleted: true, created_at: new Date().toISOString() });
+                }
+            }
+            break;
+        }
+        case "open-reply": {
+            const f = $(`form[data-form="comment-reply"][data-parent="${id}"]`);
+            if (f) {
+                f.classList.remove("hidden");
+                $("input", f)?.focus();
+            }
+            break;
+        }
+        case "close-reply": {
+            const f = $(`form[data-form="comment-reply"][data-parent="${id}"]`);
+            if (f) f.classList.add("hidden");
+            break;
+        }
+        case "toggle-replies": {
+            const rep = $(`#replies-${id}`);
+            if (rep) {
+                const isHidden = rep.classList.toggle("hidden");
+                const span = $("span", el);
+                const count = rep.children.length;
+                if (span) span.textContent = isHidden ? `Afficher les réponses (${count})` : "Masquer les réponses";
+                const ic = $("i", el);
+                if (ic) ic.className = isHidden ? "fa-solid fa-chevron-down text-[10px]" : "fa-solid fa-chevron-up text-[10px]";
+            }
+            break;
+        }
+        case "comment-react": {
+            const commentId = +el.dataset.id, type = el.dataset.type, postId = +el.dataset.post;
+            const d = await api("comment_react", { method: "POST", body: { comment_id: commentId, type } });
+            if (d.success) {
+                await renderComments(postId);
+            } else {
+                toast(d.message, "error");
+            }
+            break;
+        }
         case "toggle-menu": $("#user-menu").classList.toggle("hidden"); break;
         case "logout": await doLogout(); break;
         case "resend": await onResend(el); break;
@@ -900,6 +1445,21 @@ document.addEventListener("submit", async (e) => {
         const d = await api("comment_add", { method: "POST", body: { post_id: id, content: inp.value.trim() } });
         setBusy(btn, false);
         return d.success ? renderComments(id) : toast(d.message, "error");
+    }
+    if (name === "comment-reply") {
+        const inp = $("input", form), postId = +form.dataset.post, parentId = +form.dataset.parent;
+        if (!inp.value.trim()) return;
+        setBusy(btn, true, "");
+        const d = await api("comment_add", { method: "POST", body: { post_id: postId, parent_id: parentId, content: inp.value.trim() } });
+        setBusy(btn, false);
+        if (!d.success) return toast(d.message, "error");
+        await renderComments(postId);
+        const rep = $(`#replies-${parentId}`);
+        if (rep) rep.classList.remove("hidden");
+        return;
+    }
+    if (name === "chat-send") {
+        return onChatSend(form);
     }
     if (name === "job") {
         setBusy(btn, true, "Publication…");

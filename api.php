@@ -30,6 +30,7 @@ const DUMMY_HASH = '$2y$10$hV9vufd3mvw1zPmfPX6.C.YxMBw5Vb5FrXjHHoct96SQwhiyOcDkq
 $GET_ACTIONS = [
     'me', 'file', 'posts', 'comments', 'profile', 'people', 'connections', 'notifications',
     'jobs', 'products', 'stats', 'admin_verifications', 'admin_companies',
+    'conversations', 'messages',
 ];
 $POST_ACTIONS = [
     'register', 'login', 'logout', 'verify_email', 'verify_code', 'resend_verification',
@@ -37,6 +38,7 @@ $POST_ACTIONS = [
     'post_create', 'post_update', 'post_delete', 'like_set', 'comment_add', 'comment_delete',
     'invite_send', 'invite_respond', 'invite_cancel', 'connection_remove',
     'notif_read', 'notif_read_all', 'job_create', 'job_apply', 'product_create', 'admin_review',
+    'message_send', 'message_delete', 'comment_react',
 ];
 
 if (in_array($action, $GET_ACTIONS, true)) {
@@ -75,6 +77,18 @@ function unread_count(int $uid): int
 {
     $st = db()->prepare('SELECT COUNT(*) FROM notifications WHERE user_id = ? AND is_read = 0');
     $st->execute([$uid]);
+    return (int)$st->fetchColumn();
+}
+
+function unread_messages_count(int $uid): int
+{
+    $st = db()->prepare('SELECT COUNT(*) FROM messages m
+                         JOIN conversations c ON c.id = m.conversation_id
+                         WHERE (c.user_low = ? OR c.user_high = ?)
+                           AND m.sender_id != ?
+                           AND m.read_at IS NULL
+                           AND m.is_deleted = 0');
+    $st->execute([$uid, $uid, $uid]);
     return (int)$st->fetchColumn();
 }
 
@@ -118,6 +132,7 @@ function act_me(array $in): void
         'csrf' => $_SESSION['csrf'],
         'user' => me_payload($u),
         'unread' => $u ? unread_count((int)$u['id']) : 0,
+        'unread_messages' => $u ? unread_messages_count((int)$u['id']) : 0,
         'mail_mode' => cfg('mail.mode', 'log'),
     ]);
 }
@@ -803,14 +818,35 @@ function act_comments(array $in): void
 {
     $me = require_login();
     $p = load_post((int)($_GET['post_id'] ?? 0));
-    $st = db()->prepare('SELECT c.id, c.user_id, c.content, c.created_at, u.name AS author, u.role AS author_role, (u.avatar_path IS NOT NULL) AS has_avatar
-                         FROM post_comments c JOIN users u ON u.id = c.user_id WHERE c.post_id = ? ORDER BY c.id ASC LIMIT 200');
-    $st->execute([$p['id']]);
+    $meId = (int)$me['id'];
+    $sql = "SELECT c.id, c.parent_id, c.user_id, c.content, c.created_at,
+                   u.name AS author, u.role AS author_role, (u.avatar_path IS NOT NULL) AS has_avatar,
+                   (SELECT cr.type FROM comment_reactions cr WHERE cr.comment_id = c.id AND cr.user_id = ?) AS my_reaction,
+                   (SELECT COUNT(*) FROM comment_reactions cr WHERE cr.comment_id = c.id AND cr.type = 'like') AS r_like,
+                   (SELECT COUNT(*) FROM comment_reactions cr WHERE cr.comment_id = c.id AND cr.type = 'love') AS r_love,
+                   (SELECT COUNT(*) FROM comment_reactions cr WHERE cr.comment_id = c.id AND cr.type = 'bravo') AS r_bravo,
+                   (SELECT COUNT(*) FROM comment_reactions cr WHERE cr.comment_id = c.id AND cr.type = 'insightful') AS r_insightful
+            FROM post_comments c
+            JOIN users u ON u.id = c.user_id
+            WHERE c.post_id = ?
+            ORDER BY c.id ASC LIMIT 300";
+    $st = db()->prepare($sql);
+    $st->execute([$meId, $p['id']]);
     $rows = $st->fetchAll();
     foreach ($rows as &$r) {
-        $r['id'] = (int)$r['id']; $r['user_id'] = (int)$r['user_id']; $r['has_avatar'] = (bool)$r['has_avatar'];
-        // l'auteur du commentaire, l'auteur de la publication et les modérateurs peuvent supprimer
-        $r['can_delete'] = $r['user_id'] === (int)$me['id'] || (int)$p['user_id'] === (int)$me['id'] || can_moderate($me);
+        $r['id'] = (int)$r['id'];
+        $r['parent_id'] = $r['parent_id'] !== null ? (int)$r['parent_id'] : null;
+        $r['user_id'] = (int)$r['user_id'];
+        $r['has_avatar'] = (bool)$r['has_avatar'];
+        $r['can_delete'] = $r['user_id'] === $meId || (int)$p['user_id'] === $meId || can_moderate($me);
+        $r['reactions'] = [
+            'like' => (int)$r['r_like'],
+            'love' => (int)$r['r_love'],
+            'bravo' => (int)$r['r_bravo'],
+            'insightful' => (int)$r['r_insightful'],
+        ];
+        $r['total_reactions'] = array_sum($r['reactions']);
+        unset($r['r_like'], $r['r_love'], $r['r_bravo'], $r['r_insightful']);
     }
     json_out(['success' => true, 'comments' => $rows]);
 }
@@ -822,12 +858,39 @@ function act_comment_add(array $in): void
     rate_guard('comment', (string)$u['id'], 40, 600, 'Vous commentez trop vite. Patientez quelques minutes.');
     $content = clean_text($in['content'] ?? '', 1000);
     if ($content === '') fail('Le commentaire est vide.', 422);
-    db()->prepare('INSERT INTO post_comments (post_id, user_id, content) VALUES (?, ?, ?)')->execute([$p['id'], $u['id'], $content]);
-    rate_hit('comment', (string)$u['id']);
-    if ((int)$p['user_id'] !== (int)$u['id']) {
-        notify((int)$p['user_id'], 'post_commented', $u['name'] . ' a commenté votre publication.', (int)$u['id'], (int)$p['id']);
+
+    $parentId = isset($in['parent_id']) && $in['parent_id'] !== '' && (int)$in['parent_id'] > 0 ? (int)$in['parent_id'] : null;
+    $parentAuthorId = null;
+    if ($parentId !== null) {
+        $pSt = db()->prepare('SELECT id, post_id, user_id, parent_id FROM post_comments WHERE id = ?');
+        $pSt->execute([$parentId]);
+        $parentRow = $pSt->fetch();
+        if (!$parentRow || (int)$parentRow['post_id'] !== (int)$p['id']) {
+            fail('Commentaire parent introuvable.', 404);
+        }
+        $parentAuthorId = (int)$parentRow['user_id'];
+        // Règle : un seul niveau d'imbrication
+        if ($parentRow['parent_id'] !== null) {
+            $parentId = (int)$parentRow['parent_id'];
+        }
     }
-    json_out(['success' => true, 'message' => 'Commentaire ajouté.'], 201);
+
+    db()->prepare('INSERT INTO post_comments (post_id, user_id, parent_id, content) VALUES (?, ?, ?, ?)')
+        ->execute([$p['id'], $u['id'], $parentId, $content]);
+    $newId = (int)db()->lastInsertId();
+    rate_hit('comment', (string)$u['id']);
+
+    if ($parentId !== null) {
+        if ($parentAuthorId && $parentAuthorId !== (int)$u['id']) {
+            notify($parentAuthorId, 'comment_replied', $u['name'] . ' a répondu à votre commentaire.', (int)$u['id'], (int)$p['id']);
+        }
+    } else {
+        if ((int)$p['user_id'] !== (int)$u['id']) {
+            notify((int)$p['user_id'], 'post_commented', $u['name'] . ' a commenté votre publication.', (int)$u['id'], (int)$p['id']);
+        }
+    }
+
+    json_out(['success' => true, 'message' => $parentId ? 'Réponse ajoutée.' : 'Commentaire ajouté.', 'id' => $newId], 201);
 }
 
 function act_comment_delete(array $in): void
@@ -841,6 +904,62 @@ function act_comment_delete(array $in): void
     if ((int)$c['user_id'] !== $uid && (int)$c['post_owner'] !== $uid && !can_moderate($u)) fail('Action non autorisée.', 403);
     db()->prepare('DELETE FROM post_comments WHERE id = ?')->execute([$c['id']]);
     json_out(['success' => true, 'message' => 'Commentaire supprimé.']);
+}
+
+function act_comment_react(array $in): void
+{
+    $u = require_login();
+    $commentId = (int)($in['comment_id'] ?? 0);
+    $type = (string)($in['type'] ?? '');
+    $validTypes = ['like', 'love', 'bravo', 'insightful'];
+    if (!in_array($type, $validTypes, true)) fail('Type de réaction invalide.', 422);
+
+    $pdo = db();
+    $st = $pdo->prepare('SELECT c.id, c.post_id, c.user_id FROM post_comments c WHERE c.id = ?');
+    $st->execute([$commentId]);
+    $cm = $st->fetch();
+    if (!$cm) fail('Commentaire introuvable.', 404);
+
+    $chk = $pdo->prepare('SELECT type FROM comment_reactions WHERE comment_id = ? AND user_id = ?');
+    $chk->execute([$commentId, $u['id']]);
+    $existing = $chk->fetchColumn();
+
+    $myReaction = null;
+    if ($existing === $type) {
+        $pdo->prepare('DELETE FROM comment_reactions WHERE comment_id = ? AND user_id = ?')
+            ->execute([$commentId, $u['id']]);
+        $myReaction = null;
+    } else {
+        $ins = $pdo->prepare('INSERT INTO comment_reactions (comment_id, user_id, type) VALUES (?, ?, ?)
+                              ON DUPLICATE KEY UPDATE type = VALUES(type), created_at = NOW()');
+        $ins->execute([$commentId, $u['id'], $type]);
+        $myReaction = $type;
+
+        if ((int)$cm['user_id'] !== (int)$u['id']) {
+            $labels = [
+                'like' => 'a aimé',
+                'love' => 'a adoré',
+                'bravo' => 'a applaudi',
+                'insightful' => 'a trouvé intéressant',
+            ];
+            $actionLabel = $labels[$type] ?? 'a réagi à';
+            notify((int)$cm['user_id'], 'comment_reacted', $u['name'] . ' ' . $actionLabel . ' votre commentaire.', (int)$u['id'], (int)$cm['post_id'], true);
+        }
+    }
+
+    $countsSt = $pdo->prepare('SELECT type, COUNT(*) as cnt FROM comment_reactions WHERE comment_id = ? GROUP BY type');
+    $countsSt->execute([$commentId]);
+    $reactions = ['like' => 0, 'love' => 0, 'bravo' => 0, 'insightful' => 0];
+    foreach ($countsSt->fetchAll() as $row) {
+        $reactions[$row['type']] = (int)$row['cnt'];
+    }
+
+    json_out([
+        'success' => true,
+        'my_reaction' => $myReaction,
+        'reactions' => $reactions,
+        'total' => array_sum($reactions),
+    ]);
 }
 
 // =====================================================================
@@ -1074,4 +1193,264 @@ function act_stats(array $in): void
         'pending_verifications' => $count("SELECT COUNT(*) FROM company_verifications WHERE status = 'pending'"),
         'verified_companies' => $count("SELECT COUNT(*) FROM company_profiles WHERE verification_status = 'verified'"),
     ]]);
+}
+
+
+// =====================================================================
+//  Messagerie (Chat)
+// =====================================================================
+
+function assert_chat_access(int $meId, string $meRole, int $otherId): array
+{
+    if ($meId === $otherId) fail('Vous ne pouvez pas converser avec vous-même.', 422);
+
+    $st = db()->prepare('SELECT id, name, role, is_active, email_verified_at, avatar_path FROM users WHERE id = ?');
+    $st->execute([$otherId]);
+    $other = $st->fetch();
+    if (!$other || !$other['is_active'] || !$other['email_verified_at']) {
+        fail('Utilisateur introuvable ou indisponible.', 404);
+    }
+
+    if ($meRole === 'company' && $other['role'] === 'company') {
+        fail('Les échanges entre entreprises ne sont pas autorisés.', 403);
+    }
+
+    [$lo, $hi] = pair($meId, $otherId);
+    $cSt = db()->prepare("SELECT id FROM connections WHERE user_low = ? AND user_high = ? AND status = 'accepted'");
+    $cSt->execute([$lo, $hi]);
+    if (!$cSt->fetch()) {
+        fail('Vous devez être en relation acceptée pour échanger des messages.', 403);
+    }
+
+    return $other;
+}
+
+function get_or_create_conversation(int $meId, int $otherId): int
+{
+    [$lo, $hi] = pair($meId, $otherId);
+    $pdo = db();
+    $st = $pdo->prepare('SELECT id FROM conversations WHERE user_low = ? AND user_high = ?');
+    $st->execute([$lo, $hi]);
+    $id = $st->fetchColumn();
+    if ($id) return (int)$id;
+
+    $ins = $pdo->prepare('INSERT INTO conversations (user_low, user_high) VALUES (?, ?)');
+    try {
+        $ins->execute([$lo, $hi]);
+        return (int)$pdo->lastInsertId();
+    } catch (PDOException $e) {
+        $st->execute([$lo, $hi]);
+        $id = $st->fetchColumn();
+        if ($id) return (int)$id;
+        throw $e;
+    }
+}
+
+function act_conversations(array $in): void
+{
+    $me = require_login();
+    $meId = (int)$me['id'];
+    $pdo = db();
+
+    $sql = "
+        SELECT c.id AS conversation_id, c.updated_at,
+               o.id AS other_id, o.name AS other_name, o.role AS other_role,
+               (o.avatar_path IS NOT NULL) AS has_avatar,
+               (cp.verification_status = 'verified') AS verified,
+               m.id AS last_message_id, m.sender_id AS last_sender_id, m.content AS last_content,
+               m.created_at AS last_message_at, m.is_deleted AS last_is_deleted,
+               (
+                   SELECT COUNT(*) FROM messages unread
+                   WHERE unread.conversation_id = c.id
+                     AND unread.sender_id != ?
+                     AND unread.read_at IS NULL
+                     AND unread.is_deleted = 0
+               ) AS unread_count
+        FROM conversations c
+        JOIN users o ON o.id = IF(c.user_low = ?, c.user_high, c.user_low)
+        LEFT JOIN company_profiles cp ON cp.user_id = o.id
+        JOIN connections conn ON conn.user_low = c.user_low AND conn.user_high = c.user_high AND conn.status = 'accepted'
+        LEFT JOIN messages m ON m.id = (
+            SELECT m2.id FROM messages m2 WHERE m2.conversation_id = c.id ORDER BY m2.id DESC LIMIT 1
+        )
+        WHERE (c.user_low = ? OR c.user_high = ?)
+          AND o.is_active = 1
+          AND NOT (? = 'company' AND o.role = 'company')
+        ORDER BY COALESCE(m.created_at, c.updated_at) DESC
+    ";
+    $st = $pdo->prepare($sql);
+    $st->execute([$meId, $meId, $meId, $meId, $me['role']]);
+    $rows = $st->fetchAll();
+    foreach ($rows as &$r) {
+        $r['conversation_id'] = (int)$r['conversation_id'];
+        $r['other_id'] = (int)$r['other_id'];
+        $r['has_avatar'] = (bool)$r['has_avatar'];
+        $r['verified'] = (bool)$r['verified'];
+        $r['unread_count'] = (int)$r['unread_count'];
+        $r['last_sender_id'] = $r['last_sender_id'] !== null ? (int)$r['last_sender_id'] : null;
+        if ($r['last_is_deleted']) {
+            $r['last_content'] = 'Message supprimé';
+        }
+    }
+    json_out(['success' => true, 'conversations' => $rows]);
+}
+
+function act_messages(array $in): void
+{
+    $me = require_login();
+    $meId = (int)$me['id'];
+    $pdo = db();
+
+    $convId = isset($_GET['conversation_id']) ? (int)$_GET['conversation_id'] : 0;
+    $otherId = isset($_GET['user_id']) ? (int)$_GET['user_id'] : 0;
+
+    if ($convId > 0) {
+        $cSt = $pdo->prepare('SELECT * FROM conversations WHERE id = ?');
+        $cSt->execute([$convId]);
+        $conv = $cSt->fetch();
+        if (!$conv) fail('Conversation introuvable.', 404);
+        if ((int)$conv['user_low'] !== $meId && (int)$conv['user_high'] !== $meId) {
+            fail('Accès non autorisé à cette conversation.', 403);
+        }
+        $otherId = (int)$conv['user_low'] === $meId ? (int)$conv['user_high'] : (int)$conv['user_low'];
+    } elseif ($otherId > 0) {
+        $convId = get_or_create_conversation($meId, $otherId);
+        $cSt = $pdo->prepare('SELECT * FROM conversations WHERE id = ?');
+        $cSt->execute([$convId]);
+        $conv = $cSt->fetch();
+    } else {
+        fail('Conversation non spécifiée.', 422);
+    }
+
+    $other = assert_chat_access($meId, $me['role'], $otherId);
+
+    // Marquer les messages reçus comme lus
+    $mark = $pdo->prepare('UPDATE messages SET read_at = NOW() WHERE conversation_id = ? AND sender_id = ? AND read_at IS NULL');
+    $mark->execute([$convId, $otherId]);
+
+    // Marquer les notifications message_received comme lues
+    $pdo->prepare("UPDATE notifications SET is_read = 1 WHERE user_id = ? AND type = 'message_received' AND ref_id = ?")
+        ->execute([$meId, $convId]);
+
+    $afterId = (int)($_GET['after_id'] ?? 0);
+    $beforeId = (int)($_GET['before_id'] ?? 0);
+
+    $sql = 'SELECT id, conversation_id, sender_id, content, is_deleted, created_at, read_at
+            FROM messages WHERE conversation_id = ?';
+    $params = [$convId];
+
+    if ($afterId > 0) {
+        $sql .= ' AND id > ? ORDER BY id ASC LIMIT 100';
+        $params[] = $afterId;
+    } elseif ($beforeId > 0) {
+        $sql .= ' AND id < ? ORDER BY id DESC LIMIT 50';
+        $params[] = $beforeId;
+    } else {
+        $sql .= ' ORDER BY id DESC LIMIT 50';
+    }
+
+    $st = $pdo->prepare($sql);
+    $st->execute($params);
+    $rows = $st->fetchAll();
+    if ($afterId === 0) {
+        $rows = array_reverse($rows);
+    }
+
+    foreach ($rows as &$m) {
+        $m['id'] = (int)$m['id'];
+        $m['conversation_id'] = (int)$m['conversation_id'];
+        $m['sender_id'] = (int)$m['sender_id'];
+        $m['is_me'] = $m['sender_id'] === $meId;
+        $m['is_deleted'] = (bool)$m['is_deleted'];
+        if ($m['is_deleted']) {
+            $m['content'] = 'Message supprimé';
+        }
+    }
+
+    $cpSt = $pdo->prepare("SELECT verification_status FROM company_profiles WHERE user_id = ?");
+    $cpSt->execute([$otherId]);
+    $vStatus = $cpSt->fetchColumn();
+
+    $otherPayload = [
+        'id' => (int)$other['id'],
+        'name' => $other['name'],
+        'role' => $other['role'],
+        'has_avatar' => !empty($other['avatar_path']),
+        'verified' => $vStatus === 'verified',
+    ];
+
+    json_out([
+        'success' => true,
+        'conversation_id' => $convId,
+        'other' => $otherPayload,
+        'messages' => $rows,
+    ]);
+}
+
+function act_message_send(array $in): void
+{
+    $me = require_login();
+    $meId = (int)$me['id'];
+    rate_guard('message', (string)$meId, 60, 60, 'Vous envoyez trop de messages. Patientez quelques secondes.');
+
+    $convId = (int)($in['conversation_id'] ?? 0);
+    $otherId = (int)($in['user_id'] ?? 0);
+    $content = clean_text($in['content'] ?? '', 2000);
+    if ($content === '') fail('Le message ne peut pas être vide.', 422);
+
+    $pdo = db();
+    if ($convId > 0) {
+        $cSt = $pdo->prepare('SELECT * FROM conversations WHERE id = ?');
+        $cSt->execute([$convId]);
+        $conv = $cSt->fetch();
+        if (!$conv) fail('Conversation introuvable.', 404);
+        if ((int)$conv['user_low'] !== $meId && (int)$conv['user_high'] !== $meId) {
+            fail('Accès refusé.', 403);
+        }
+        $otherId = (int)$conv['user_low'] === $meId ? (int)$conv['user_high'] : (int)$conv['user_low'];
+    } elseif ($otherId > 0) {
+        $convId = get_or_create_conversation($meId, $otherId);
+    } else {
+        fail('Destinataire non spécifié.', 422);
+    }
+
+    assert_chat_access($meId, $me['role'], $otherId);
+
+    $pdo->prepare('INSERT INTO messages (conversation_id, sender_id, content) VALUES (?, ?, ?)')
+        ->execute([$convId, $meId, $content]);
+    $msgId = (int)$pdo->lastInsertId();
+
+    $pdo->prepare('UPDATE conversations SET updated_at = NOW() WHERE id = ?')->execute([$convId]);
+
+    rate_hit('message', (string)$meId);
+
+    notify($otherId, 'message_received', $me['name'] . ' vous a envoyé un message.', $meId, $convId, true);
+
+    json_out([
+        'success' => true,
+        'conversation_id' => $convId,
+        'message_id' => $msgId,
+        'message' => 'Message envoyé.',
+    ], 201);
+}
+
+function act_message_delete(array $in): void
+{
+    $me = require_login();
+    $meId = (int)$me['id'];
+    $id = (int)($in['id'] ?? 0);
+
+    $pdo = db();
+    $st = $pdo->prepare('SELECT id, conversation_id, sender_id, is_deleted FROM messages WHERE id = ?');
+    $st->execute([$id]);
+    $msg = $st->fetch();
+    if (!$msg) fail('Message introuvable.', 404);
+
+    if ((int)$msg['sender_id'] !== $meId) {
+        fail('Vous ne pouvez supprimer que vos propres messages.', 403);
+    }
+
+    $pdo->prepare("UPDATE messages SET is_deleted = 1, content = 'Message supprimé' WHERE id = ?")->execute([$id]);
+
+    json_out(['success' => true, 'message' => 'Message supprimé.']);
 }
