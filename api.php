@@ -15,7 +15,7 @@ header('Cache-Control: no-store');
 start_secure_session();
 
 $action = (string)($_GET['action'] ?? '');
-$method = $_SERVER['REQUEST_METHOD'];
+$method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
 
 $input = [];
 if (stripos($_SERVER['CONTENT_TYPE'] ?? '', 'application/json') !== false) {
@@ -30,7 +30,7 @@ const DUMMY_HASH = '$2y$10$hV9vufd3mvw1zPmfPX6.C.YxMBw5Vb5FrXjHHoct96SQwhiyOcDkq
 $GET_ACTIONS = [
     'me', 'file', 'posts', 'comments', 'profile', 'people', 'connections', 'notifications',
     'jobs', 'products', 'stats', 'admin_verifications', 'admin_companies',
-    'conversations', 'messages',
+    'conversations', 'messages', 'blocked_users',
 ];
 $POST_ACTIONS = [
     'register', 'login', 'logout', 'verify_email', 'verify_code', 'resend_verification',
@@ -38,8 +38,12 @@ $POST_ACTIONS = [
     'post_create', 'post_update', 'post_delete', 'like_set', 'comment_add', 'comment_delete',
     'invite_send', 'invite_respond', 'invite_cancel', 'connection_remove',
     'notif_read', 'notif_read_all', 'job_create', 'job_apply', 'product_create', 'admin_review',
-    'message_send', 'message_delete', 'comment_react',
+    'message_send', 'message_delete', 'comment_react', 'user_block', 'report',
 ];
+
+if ($action === '' && php_sapi_name() === 'cli') {
+    return;
+}
 
 if (in_array($action, $GET_ACTIONS, true)) {
     if ($method !== 'GET') fail('Méthode non autorisée.', 405);
@@ -453,7 +457,13 @@ function act_profile(array $in): void
         }
     }
 
-    if (!$isMe) $out['connection'] = connection_state((int)$me['id'], $id);
+    if (!$isMe) {
+        $out['connection'] = connection_state((int)$me['id'], $id);
+        $bSt = db()->prepare('SELECT 1 FROM user_blocks WHERE blocker_id = ? AND blocked_id = ?');
+        $bSt->execute([(int)$me['id'], $id]);
+        $out['is_blocked'] = (bool)$bSt->fetchColumn();
+        $out['can_message'] = !($me['role'] === 'company' && $u['role'] === 'company');
+    }
     $c = db()->prepare("SELECT COUNT(*) FROM connections WHERE status = 'accepted' AND (sender_id = ? OR receiver_id = ?)");
     $c->execute([$id, $id]);
     $out['connections_count'] = (int)$c->fetchColumn();
@@ -821,6 +831,7 @@ function act_comments(array $in): void
     $meId = (int)$me['id'];
     $sql = "SELECT c.id, c.parent_id, c.user_id, c.content, c.created_at,
                    u.name AS author, u.role AS author_role, (u.avatar_path IS NOT NULL) AS has_avatar,
+                   pu.name AS reply_to_author,
                    (SELECT cr.type FROM comment_reactions cr WHERE cr.comment_id = c.id AND cr.user_id = ?) AS my_reaction,
                    (SELECT COUNT(*) FROM comment_reactions cr WHERE cr.comment_id = c.id AND cr.type = 'like') AS r_like,
                    (SELECT COUNT(*) FROM comment_reactions cr WHERE cr.comment_id = c.id AND cr.type = 'love') AS r_love,
@@ -828,8 +839,10 @@ function act_comments(array $in): void
                    (SELECT COUNT(*) FROM comment_reactions cr WHERE cr.comment_id = c.id AND cr.type = 'insightful') AS r_insightful
             FROM post_comments c
             JOIN users u ON u.id = c.user_id
+            LEFT JOIN post_comments parent_c ON parent_c.id = c.parent_id
+            LEFT JOIN users pu ON pu.id = parent_c.user_id
             WHERE c.post_id = ?
-            ORDER BY c.id ASC LIMIT 300";
+            ORDER BY c.id ASC LIMIT 500";
     $st = db()->prepare($sql);
     $st->execute([$meId, $p['id']]);
     $rows = $st->fetchAll();
@@ -869,10 +882,6 @@ function act_comment_add(array $in): void
             fail('Commentaire parent introuvable.', 404);
         }
         $parentAuthorId = (int)$parentRow['user_id'];
-        // Règle : un seul niveau d'imbrication
-        if ($parentRow['parent_id'] !== null) {
-            $parentId = (int)$parentRow['parent_id'];
-        }
     }
 
     db()->prepare('INSERT INTO post_comments (post_id, user_id, parent_id, content) VALUES (?, ?, ?, ?)')
@@ -884,9 +893,12 @@ function act_comment_add(array $in): void
         if ($parentAuthorId && $parentAuthorId !== (int)$u['id']) {
             notify($parentAuthorId, 'comment_replied', $u['name'] . ' a répondu à votre commentaire.', (int)$u['id'], (int)$p['id']);
         }
+        if ((int)$p['user_id'] !== (int)$u['id'] && (int)$p['user_id'] !== $parentAuthorId) {
+            notify((int)$p['user_id'], 'post_commented', $u['name'] . ' a commenté votre publication.', (int)$u['id'], (int)$p['id'], true);
+        }
     } else {
         if ((int)$p['user_id'] !== (int)$u['id']) {
-            notify((int)$p['user_id'], 'post_commented', $u['name'] . ' a commenté votre publication.', (int)$u['id'], (int)$p['id']);
+            notify((int)$p['user_id'], 'post_commented', $u['name'] . ' a commenté votre publication.', (int)$u['id'], (int)$p['id'], true);
         }
     }
 
@@ -959,6 +971,7 @@ function act_comment_react(array $in): void
         'my_reaction' => $myReaction,
         'reactions' => $reactions,
         'total' => array_sum($reactions),
+        'total_reactions' => array_sum($reactions),
     ]);
 }
 
@@ -1215,11 +1228,16 @@ function assert_chat_access(int $meId, string $meRole, int $otherId): array
         fail('Les échanges entre entreprises ne sont pas autorisés.', 403);
     }
 
-    [$lo, $hi] = pair($meId, $otherId);
-    $cSt = db()->prepare("SELECT id FROM connections WHERE user_low = ? AND user_high = ? AND status = 'accepted'");
-    $cSt->execute([$lo, $hi]);
-    if (!$cSt->fetch()) {
-        fail('Vous devez être en relation acceptée pour échanger des messages.', 403);
+    // Vérifier si un blocage existe entre les deux utilisateurs
+    $bSt = db()->prepare('SELECT blocker_id FROM user_blocks WHERE (blocker_id = ? AND blocked_id = ?) OR (blocker_id = ? AND blocked_id = ?)');
+    $bSt->execute([$meId, $otherId, $otherId, $meId]);
+    $blockRow = $bSt->fetch();
+    if ($blockRow) {
+        if ((int)$blockRow['blocker_id'] === $meId) {
+            fail('Vous avez bloqué cet utilisateur. Débloquez-le pour lui écrire.', 403);
+        } else {
+            fail('Cet utilisateur ne souhaite pas recevoir de messages.', 403);
+        }
     }
 
     return $other;
@@ -1265,11 +1283,11 @@ function act_conversations(array $in): void
                      AND unread.sender_id != ?
                      AND unread.read_at IS NULL
                      AND unread.is_deleted = 0
-               ) AS unread_count
+               ) AS unread_count,
+               (SELECT 1 FROM user_blocks ub WHERE ub.blocker_id = ? AND ub.blocked_id = o.id LIMIT 1) AS is_blocked
         FROM conversations c
         JOIN users o ON o.id = IF(c.user_low = ?, c.user_high, c.user_low)
         LEFT JOIN company_profiles cp ON cp.user_id = o.id
-        JOIN connections conn ON conn.user_low = c.user_low AND conn.user_high = c.user_high AND conn.status = 'accepted'
         LEFT JOIN messages m ON m.id = (
             SELECT m2.id FROM messages m2 WHERE m2.conversation_id = c.id ORDER BY m2.id DESC LIMIT 1
         )
@@ -1279,13 +1297,14 @@ function act_conversations(array $in): void
         ORDER BY COALESCE(m.created_at, c.updated_at) DESC
     ";
     $st = $pdo->prepare($sql);
-    $st->execute([$meId, $meId, $meId, $meId, $me['role']]);
+    $st->execute([$meId, $meId, $meId, $meId, $meId, $me['role']]);
     $rows = $st->fetchAll();
     foreach ($rows as &$r) {
         $r['conversation_id'] = (int)$r['conversation_id'];
         $r['other_id'] = (int)$r['other_id'];
         $r['has_avatar'] = (bool)$r['has_avatar'];
         $r['verified'] = (bool)$r['verified'];
+        $r['is_blocked'] = (bool)$r['is_blocked'];
         $r['unread_count'] = (int)$r['unread_count'];
         $r['last_sender_id'] = $r['last_sender_id'] !== null ? (int)$r['last_sender_id'] : null;
         if ($r['last_is_deleted']) {
@@ -1371,12 +1390,17 @@ function act_messages(array $in): void
     $cpSt->execute([$otherId]);
     $vStatus = $cpSt->fetchColumn();
 
+    $bChk = $pdo->prepare('SELECT 1 FROM user_blocks WHERE blocker_id = ? AND blocked_id = ?');
+    $bChk->execute([$meId, $otherId]);
+    $isBlocked = (bool)$bChk->fetchColumn();
+
     $otherPayload = [
         'id' => (int)$other['id'],
         'name' => $other['name'],
         'role' => $other['role'],
         'has_avatar' => !empty($other['avatar_path']),
         'verified' => $vStatus === 'verified',
+        'is_blocked' => $isBlocked,
     ];
 
     json_out([
@@ -1409,12 +1433,19 @@ function act_message_send(array $in): void
         }
         $otherId = (int)$conv['user_low'] === $meId ? (int)$conv['user_high'] : (int)$conv['user_low'];
     } elseif ($otherId > 0) {
+        rate_guard('new_conv_' . $meId, date('YmdH'), 30, 3600, 'Limite de nouvelles conversations atteinte pour cette heure.');
         $convId = get_or_create_conversation($meId, $otherId);
     } else {
         fail('Destinataire non spécifié.', 422);
     }
 
     assert_chat_access($meId, $me['role'], $otherId);
+
+    $dupSt = $pdo->prepare('SELECT id FROM messages WHERE conversation_id = ? AND sender_id = ? AND content = ? AND created_at > (NOW() - INTERVAL 8 SECOND) LIMIT 1');
+    $dupSt->execute([$convId, $meId, $content]);
+    if ($dupSt->fetch()) {
+        fail('Message identique envoyé récemment. Veuillez patienter un instant.', 429);
+    }
 
     $pdo->prepare('INSERT INTO messages (conversation_id, sender_id, content) VALUES (?, ?, ?)')
         ->execute([$convId, $meId, $content]);
@@ -1453,4 +1484,93 @@ function act_message_delete(array $in): void
     $pdo->prepare("UPDATE messages SET is_deleted = 1, content = 'Message supprimé' WHERE id = ?")->execute([$id]);
 
     json_out(['success' => true, 'message' => 'Message supprimé.']);
+}
+
+function act_user_block(array $in): void
+{
+    $me = require_login();
+    $meId = (int)$me['id'];
+    $targetId = (int)($in['user_id'] ?? 0);
+    if ($targetId <= 0 || $targetId === $meId) fail('Action impossible.', 422);
+
+    $targetSt = db()->prepare('SELECT id FROM users WHERE id = ?');
+    $targetSt->execute([$targetId]);
+    if (!$targetSt->fetch()) fail('Utilisateur introuvable.', 404);
+
+    $pdo = db();
+    $chk = $pdo->prepare('SELECT id FROM user_blocks WHERE blocker_id = ? AND blocked_id = ?');
+    $chk->execute([$meId, $targetId]);
+    $block = $chk->fetch();
+
+    if ($block) {
+        $pdo->prepare('DELETE FROM user_blocks WHERE id = ?')->execute([$block['id']]);
+        json_out(['success' => true, 'blocked' => false, 'message' => 'Utilisateur débloqué.']);
+    } else {
+        $pdo->prepare('INSERT INTO user_blocks (blocker_id, blocked_id) VALUES (?, ?)')
+            ->execute([$meId, $targetId]);
+        json_out(['success' => true, 'blocked' => true, 'message' => 'Utilisateur bloqué. Cet utilisateur ne peut plus vous écrire.']);
+    }
+}
+
+function act_blocked_users(array $in): void
+{
+    $me = require_login();
+    $st = db()->prepare('SELECT u.id, u.name, u.role, (u.avatar_path IS NOT NULL) AS has_avatar, b.created_at AS blocked_at
+                         FROM user_blocks b
+                         JOIN users u ON u.id = b.blocked_id
+                         WHERE b.blocker_id = ? ORDER BY b.id DESC');
+    $st->execute([(int)$me['id']]);
+    $rows = $st->fetchAll();
+    foreach ($rows as &$r) {
+        $r['id'] = (int)$r['id'];
+        $r['has_avatar'] = (bool)$r['has_avatar'];
+    }
+    json_out(['success' => true, 'blocked_users' => $rows]);
+}
+
+function act_report(array $in): void
+{
+    $me = require_login();
+    $meId = (int)$me['id'];
+    rate_guard('report', (string)$meId, 10, 3600, 'Vous avez envoyé trop de signalements récemment. Réessayez plus tard.');
+
+    $targetType = (string)($in['target_type'] ?? 'user');
+    $validTypes = ['user', 'post', 'comment', 'message'];
+    if (!in_array($targetType, $validTypes, true)) fail('Type de cible invalide.', 422);
+
+    $targetId = (int)($in['target_id'] ?? 0);
+    if ($targetId <= 0) fail('Cible invalide.', 422);
+
+    $reportedUserId = null;
+    $pdo = db();
+    if ($targetType === 'user') {
+        $reportedUserId = $targetId;
+    } elseif ($targetType === 'post') {
+        $st = $pdo->prepare('SELECT user_id FROM posts WHERE id = ?');
+        $st->execute([$targetId]);
+        $reportedUserId = $st->fetchColumn() ?: null;
+    } elseif ($targetType === 'comment') {
+        $st = $pdo->prepare('SELECT user_id FROM post_comments WHERE id = ?');
+        $st->execute([$targetId]);
+        $reportedUserId = $st->fetchColumn() ?: null;
+    } elseif ($targetType === 'message') {
+        $st = $pdo->prepare('SELECT sender_id FROM messages WHERE id = ?');
+        $st->execute([$targetId]);
+        $reportedUserId = $st->fetchColumn() ?: null;
+    }
+
+    if ($reportedUserId !== null && (int)$reportedUserId === $meId) {
+        fail('Vous ne pouvez pas vous signaler vous-même.', 422);
+    }
+
+    $reason = clean_text($in['reason'] ?? '', 100);
+    if ($reason === '') fail('Le motif du signalement est obligatoire.', 422);
+
+    $details = clean_text($in['details'] ?? '', 1000);
+
+    $pdo->prepare('INSERT INTO reports (reporter_id, reported_user_id, target_type, target_id, reason, details) VALUES (?, ?, ?, ?, ?, ?)')
+        ->execute([$meId, $reportedUserId, $targetType, $targetId, $reason, $details]);
+    rate_hit('report', (string)$meId);
+
+    json_out(['success' => true, 'message' => 'Signalement transmis aux administrateurs. Merci pour votre vigilance.']);
 }

@@ -1,9 +1,21 @@
-# Apache : empêche l'accès direct aux fichiers sensibles
+# Apache : empêche l'accès direct aux fichiers et dossiers sensibles
 Options -Indexes
-<FilesMatch "^(config(\.example)?\.php|schema\.sql|migration\.sql|README\.md)$">
+
+# Bloquer l'accès à tous les fichiers .sql, configs, markdowns et fichiers sensibles/cachés
+<FilesMatch "(\.sql|\.md|config.*\.php|^\.)">
     Require all denied
 </FilesMatch>
+
+# Bloquer l'accès direct aux répertoires privés/internes
 <IfModule mod_rewrite.c>
     RewriteEngine On
-    RewriteRule ^(includes|tools|storage)(/|$) - [F,L]
+    RewriteRule ^(\.git|includes|tools|storage)(/|$) - [F,L]
+</IfModule>
+
+# En-têtes de sécurité
+<IfModule mod_headers.c>
+    Header always set X-Content-Type-Options "nosniff"
+    Header always set X-Frame-Options "SAMEORIGIN"
+    Header always set X-XSS-Protection "1; mode=block"
+    Header always set Referrer-Policy "same-origin"
 </IfModule>

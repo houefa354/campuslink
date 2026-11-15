@@ -74,6 +74,9 @@ function json_out(array $data, int $code = 200): never
 
 function fail(string $message, int $code = 400, array $extra = []): never
 {
+    if (!empty($GLOBALS['CAMPUSLINK_TEST_MODE'])) {
+        throw new RuntimeException($message, $code);
+    }
     json_out(['success' => false, 'message' => $message] + $extra, $code);
 }
 

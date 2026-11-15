@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="fr">
 <head>
     <meta charset="UTF-8">
@@ -452,14 +452,25 @@ async function loadPosts(reset, authorId, targetSel = "#posts") {
 }
 
 function postHTML(p) {
+    const isMe = p.user_id === state.user.id;
+    const canMessage = !isMe && !(state.user.role === "company" && p.author_role === "company");
     return `<article class="card p-4" data-post="${p.id}">
         <div class="flex items-start gap-3">
             <a href="#/profile/${p.user_id}">${avatar(p.user_id, p.author, p.has_avatar)}</a>
             <div class="flex-1 min-w-0">
-                <div class="flex items-center gap-2 flex-wrap"><a href="#/profile/${p.user_id}" class="font-semibold text-gray-900 hover:text-indigo-600 truncate">${esc(p.author)}</a>${p.verified ? verifiedBadge() : ""}${roleChip(p.author_role)}</div>
-                <p class="text-xs text-gray-400">${fmtDate(p.created_at)}${p.updated_at ? " · modifié" : ""}</p></div>
-            <div class="flex gap-1">${p.can_edit ? `<button class="btn btn-ghost !px-2.5" data-act="post-edit" data-id="${p.id}" aria-label="Modifier"><i class="fa-solid fa-pen"></i></button>` : ""}
-                ${p.can_delete ? `<button class="btn btn-ghost !px-2.5 text-red-600" data-act="post-delete" data-id="${p.id}" aria-label="Supprimer"><i class="fa-solid fa-trash"></i></button>` : ""}</div>
+                <div class="flex items-center gap-2 flex-wrap">
+                    <a href="#/profile/${p.user_id}" class="font-semibold text-gray-900 hover:text-indigo-600 truncate">${esc(p.author)}</a>
+                    ${p.verified ? verifiedBadge() : ""}
+                    ${roleChip(p.author_role)}
+                    ${canMessage ? `<a href="#/messages/${p.user_id}" class="text-xs text-indigo-600 hover:text-indigo-800 font-semibold inline-flex items-center gap-1 ml-1" title="Discuter avec ${esc(p.author)}"><i class="fa-solid fa-comments"></i> Message</a>` : ""}
+                </div>
+                <p class="text-xs text-gray-400">${fmtDate(p.created_at)}${p.updated_at ? " · modifié" : ""}</p>
+            </div>
+            <div class="flex items-center gap-1">
+                ${!isMe ? `<button type="button" class="btn btn-ghost !px-2 text-gray-400 hover:text-amber-600" data-act="report-item" data-type="post" data-id="${p.id}" title="Signaler la publication"><i class="fa-regular fa-flag text-xs"></i></button>` : ""}
+                ${p.can_edit ? `<button class="btn btn-ghost !px-2.5" data-act="post-edit" data-id="${p.id}" aria-label="Modifier"><i class="fa-solid fa-pen"></i></button>` : ""}
+                ${p.can_delete ? `<button class="btn btn-ghost !px-2.5 text-red-600" data-act="post-delete" data-id="${p.id}" aria-label="Supprimer"><i class="fa-solid fa-trash"></i></button>` : ""}
+            </div>
         </div>
         <div data-body class="mt-3 text-sm text-gray-700 whitespace-pre-wrap break-words">${esc(p.content)}</div>
         ${p.has_image ? `<img src="${fileUrl("post", p.id)}" alt="Photo de la publication" loading="lazy" class="mt-3 rounded-xl max-h-[26rem] w-full object-cover border">` : ""}
@@ -503,20 +514,56 @@ function commentHTML(cm, postId, isReply = false) {
             <a href="#/profile/${cm.user_id}" class="shrink-0">${avatar(cm.user_id, cm.author, cm.has_avatar, "sm")}</a>
             <div class="flex-1 bg-gray-50 rounded-xl px-3 py-2 min-w-0">
                 <div class="flex justify-between items-start gap-2">
-                    <a href="#/profile/${cm.user_id}" class="text-sm font-semibold hover:text-indigo-600 truncate">${esc(cm.author)}</a>
-                    <span class="text-[11px] text-gray-400 shrink-0">
+                    <div class="flex items-center gap-1.5 min-w-0">
+                        <a href="#/profile/${cm.user_id}" class="text-sm font-semibold hover:text-indigo-600 truncate">${esc(cm.author)}</a>
+                        ${cm.author_role ? roleChip(cm.author_role) : ""}
+                    </div>
+                    <span class="text-[11px] text-gray-400 shrink-0 flex items-center gap-1">
                         ${fmtDate(cm.created_at)}
-                        ${cm.can_delete ? `<button type="button" data-act="comment-delete" data-id="${cm.id}" data-post="${postId}" class="ml-1.5 text-red-500 hover:text-red-700" aria-label="Supprimer"><i class="fa-solid fa-trash-can"></i></button>` : ""}
+                        <button type="button" data-act="report-item" data-type="comment" data-id="${cm.id}" class="text-gray-400 hover:text-amber-600" title="Signaler ce commentaire"><i class="fa-regular fa-flag text-[10px]"></i></button>
+                        ${cm.can_delete ? `<button type="button" data-act="comment-delete" data-id="${cm.id}" data-post="${postId}" class="ml-1 text-red-500 hover:text-red-700" aria-label="Supprimer"><i class="fa-solid fa-trash-can"></i></button>` : ""}
                     </span>
                 </div>
-                <p class="text-sm text-gray-700 whitespace-pre-wrap break-words mt-0.5">${esc(cm.content)}</p>
+                <p class="text-sm text-gray-700 whitespace-pre-wrap break-words mt-0.5">${cm.reply_to_author ? `<span class="text-xs font-semibold text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded mr-1">@${esc(cm.reply_to_author)}</span>` : ""}${esc(cm.content)}</p>
                 <div class="flex items-center gap-2 mt-2 pt-1 border-t border-gray-200/60 flex-wrap">
                     <div class="flex items-center gap-1">${rxBtns}</div>
-                    ${!isReply ? `<button type="button" data-act="open-reply" data-id="${cm.id}" class="text-xs text-indigo-600 font-semibold hover:underline ml-1"><i class="fa-solid fa-reply mr-1"></i>Répondre</button>` : ""}
+                    <button type="button" data-act="open-reply" data-id="${cm.id}" data-post="${postId}" data-author="${esc(cm.author)}" class="text-xs text-indigo-600 font-semibold hover:underline ml-1 inline-flex items-center gap-1"><i class="fa-solid fa-reply text-[10px]"></i>Répondre</button>
                 </div>
             </div>
         </div>
     `;
+}
+
+function countDescendants(parentId, repliesMap) {
+    const direct = repliesMap[parentId] || [];
+    let total = direct.length;
+    for (const child of direct) {
+        total += countDescendants(child.id, repliesMap);
+    }
+    return total;
+}
+
+function renderRepliesTree(parentId, repliesMap, postId, depth = 1) {
+    const list = repliesMap[parentId] || [];
+    if (!list.length) return "";
+    return list.map(r => {
+        const hasChildren = (repliesMap[r.id] || []).length > 0;
+        return `
+            <div class="space-y-2" data-comment-block="${r.id}">
+                ${commentHTML(r, postId, true)}
+                <form data-form="comment-reply" data-post="${postId}" data-parent="${r.id}" class="hidden ml-8 sm:ml-10 flex gap-2 mt-2" data-reply-form="${r.id}">
+                    <input class="field !py-1.5 text-xs" maxlength="1000" placeholder="Répondre à ${esc(r.author)}…" required aria-label="Votre réponse">
+                    <button class="btn btn-primary !py-1.5 !px-3 text-xs" type="submit"><i class="fa-solid fa-paper-plane"></i></button>
+                    <button type="button" data-act="close-reply" data-id="${r.id}" class="btn btn-ghost !py-1.5 !px-2 text-xs">Annuler</button>
+                </form>
+                ${hasChildren ? `
+                    <div class="ml-3 sm:ml-5 border-l-2 border-indigo-100 pl-2.5 sm:pl-3 space-y-2 mt-1.5">
+                        ${renderRepliesTree(r.id, repliesMap, postId, depth + 1)}
+                    </div>
+                ` : ""}
+            </div>
+        `;
+    }).join("");
 }
 
 async function renderComments(id) {
@@ -529,7 +576,7 @@ async function renderComments(id) {
     const c = $("[data-ccount]", art);
     if (c) c.textContent = d.comments.length;
 
-    // Séparer commentaires racines et réponses (1 seul niveau)
+    // Séparer commentaires racines et indexer les réponses par parent_id
     const roots = d.comments.filter(cm => !cm.parent_id);
     const repliesMap = {};
     d.comments.forEach(cm => {
@@ -551,34 +598,34 @@ async function renderComments(id) {
     }
 
     const html = roots.map(root => {
-        const replies = repliesMap[root.id] || [];
-        const hasReplies = replies.length > 0;
+        const totalDesc = countDescendants(root.id, repliesMap);
+        const hasReplies = totalDesc > 0;
         return `
             <div class="space-y-2" data-comment-block="${root.id}">
                 ${commentHTML(root, id, false)}
-                ${hasReplies ? `
-                    <div class="ml-10">
-                        <button type="button" data-act="toggle-replies" data-id="${root.id}" class="text-xs text-indigo-600 font-semibold hover:underline flex items-center gap-1 mb-1">
-                            <i class="fa-solid fa-chevron-down text-[10px]"></i>
-                            <span>Afficher les réponses (${replies.length})</span>
-                        </button>
-                        <div id="replies-${root.id}" class="hidden space-y-2 border-l-2 border-indigo-100 pl-3">
-                            ${replies.map(r => commentHTML(r, id, true)).join("")}
-                        </div>
-                    </div>
-                ` : ""}
-                <form data-form="comment-reply" data-post="${id}" data-parent="${root.id}" class="hidden ml-10 flex gap-2 mt-2">
+                <form data-form="comment-reply" data-post="${id}" data-parent="${root.id}" class="hidden ml-8 sm:ml-10 flex gap-2 mt-2" data-reply-form="${root.id}">
                     <input class="field !py-1.5 text-xs" maxlength="1000" placeholder="Répondre à ${esc(root.author)}…" required aria-label="Votre réponse">
                     <button class="btn btn-primary !py-1.5 !px-3 text-xs" type="submit"><i class="fa-solid fa-paper-plane"></i></button>
                     <button type="button" data-act="close-reply" data-id="${root.id}" class="btn btn-ghost !py-1.5 !px-2 text-xs">Annuler</button>
                 </form>
+                ${hasReplies ? `
+                    <div class="ml-6 sm:ml-10">
+                        <button type="button" data-act="toggle-replies" data-id="${root.id}" class="text-xs text-indigo-600 font-semibold hover:underline flex items-center gap-1 mb-1 mt-1">
+                            <i class="fa-solid fa-chevron-down text-[10px]"></i>
+                            <span>Afficher les réponses (${totalDesc})</span>
+                        </button>
+                        <div id="replies-${root.id}" class="hidden space-y-2.5 border-l-2 border-indigo-100 pl-2.5 sm:pl-3.5 mt-1.5">
+                            ${renderRepliesTree(root.id, repliesMap, id)}
+                        </div>
+                    </div>
+                ` : ""}
             </div>
         `;
     }).join("");
 
     box.innerHTML = `
-        <div class="space-y-3">${html}</div>
-        <form data-form="comment" data-id="${id}" class="flex gap-2 mt-3">
+        <div class="space-y-3.5">${html}</div>
+        <form data-form="comment" data-id="${id}" class="flex gap-2 mt-3 pt-2 border-t">
             <input class="field !py-2" maxlength="1000" placeholder="Écrire un commentaire…" aria-label="Commentaire" required>
             <button class="btn btn-primary" type="submit" aria-label="Envoyer"><i class="fa-solid fa-paper-plane"></i></button>
         </form>
@@ -662,7 +709,7 @@ async function vProfile(r) {
             </div>
             <div class="flex flex-wrap gap-2">${p.is_me
                 ? `<a href="#/profile/edit" class="btn btn-primary"><i class="fa-solid fa-pen"></i> Modifier</a><a href="#/security" class="btn btn-ghost"><i class="fa-solid fa-lock"></i> Sécurité</a>`
-                : connButton(p.id, p.connection, p.role)}</div></div>
+                : profileActions(p)}</div></div>
             ${rows.filter(x => x[2]).length ? `<dl class="mt-5 grid sm:grid-cols-2 gap-3 text-sm">${rows.filter(x => x[2]).map(([ic, l, v]) => `<div class="flex gap-2"><i class="fa-solid ${ic} text-indigo-500 w-5 mt-0.5"></i><div><dt class="text-xs text-gray-400">${l}</dt><dd class="text-gray-800 break-words">${esc(v)}</dd></div></div>`).join("")}</dl>` : ""}
             ${bio ? `<div class="mt-5"><h2 class="text-xs font-semibold uppercase text-gray-400 mb-1">À propos</h2><p class="text-sm text-gray-700 whitespace-pre-wrap break-words">${esc(bio)}</p></div>` : ""}
             ${p.role === "company" && (p.company.description || p.company.services) ? `<div class="mt-5 grid sm:grid-cols-2 gap-4 text-sm">
@@ -675,15 +722,41 @@ async function vProfile(r) {
     await loadPosts(true, p.id, "#profile-posts");
 }
 
+function profileActions(p) {
+    const isCompanyBoth = state.user.role === "company" && p.role === "company";
+    const canMessage = !p.is_me && !isCompanyBoth && p.can_message !== false;
+    let html = "";
+    if (canMessage) {
+        html += `<a href="#/messages/${p.id}" class="btn btn-primary"><i class="fa-solid fa-comments mr-1"></i> Message</a>`;
+    }
+    const cBtn = connButton(p.id, p.connection, p.role);
+    if (cBtn) html += cBtn;
+    html += `<button type="button" data-act="toggle-block" data-uid="${p.id}" class="btn btn-ghost ${p.is_blocked ? "text-amber-700 bg-amber-50 border border-amber-200" : "text-gray-600 hover:text-red-600"}"><i class="fa-solid fa-ban mr-1"></i>${p.is_blocked ? "Débloquer" : "Bloquer"}</button>`;
+    html += `<button type="button" data-act="report-item" data-type="user" data-id="${p.id}" class="btn btn-ghost text-gray-400 hover:text-amber-600" title="Signaler cet utilisateur"><i class="fa-solid fa-flag"></i></button>`;
+    return html;
+}
+
+function memberCardActions(x) {
+    if (x.id === state.user.id) return "";
+    const isCompanyBoth = state.user.role === "company" && x.role === "company";
+    let html = "";
+    if (!isCompanyBoth) {
+        html += `<a href="#/messages/${x.id}" class="btn btn-primary !py-1 !px-2.5 text-xs"><i class="fa-solid fa-comments mr-1"></i> Message</a>`;
+    }
+    const cBtn = connButton(x.id, x.connection, x.role);
+    if (cBtn) html += cBtn;
+    return html;
+}
+
 function connButton(id, c, role) {
     if (!c || !["student", "company"].includes(role) || !["student", "company"].includes(state.user.role)) return "";
     if (state.user.role === "company" && role === "company") return "";
     switch (c.state) {
-        case "connected": return `<a href="#/messages/${id}" class="btn btn-primary"><i class="fa-solid fa-comments"></i> Envoyer un message</a><span class="btn btn-ghost !cursor-default text-green-700"><i class="fa-solid fa-user-check"></i> En relation</span>`;
-        case "sent": return `<button class="btn btn-ghost" data-act="invite-cancel" data-id="${c.id}"><i class="fa-solid fa-xmark"></i> Annuler l'invitation</button>`;
-        case "received": return `<button class="btn btn-green" data-act="invite-accept" data-id="${c.id}"><i class="fa-solid fa-check"></i> Accepter</button><button class="btn btn-ghost" data-act="invite-decline" data-id="${c.id}">Refuser</button>`;
+        case "connected": return `<span class="btn btn-ghost !cursor-default text-green-700"><i class="fa-solid fa-user-check mr-1"></i> En relation</span>`;
+        case "sent": return `<button class="btn btn-ghost" data-act="invite-cancel" data-id="${c.id}"><i class="fa-solid fa-xmark mr-1"></i> Invitation envoyée</button>`;
+        case "received": return `<button class="btn btn-green" data-act="invite-accept" data-id="${c.id}"><i class="fa-solid fa-check mr-1"></i> Accepter</button><button class="btn btn-ghost" data-act="invite-decline" data-id="${c.id}">Refuser</button>`;
         case "declined": return `<span class="btn btn-ghost !cursor-default text-gray-500">Invitation refusée</span>`;
-        default: return `<button class="btn btn-primary" data-act="invite-send" data-uid="${id}"><i class="fa-solid fa-user-plus"></i> Inviter</button>`;
+        default: return `<button class="btn btn-ghost text-indigo-600 hover:bg-indigo-50 border border-indigo-200" data-act="invite-send" data-uid="${id}"><i class="fa-solid fa-user-plus mr-1"></i> Inviter</button>`;
     }
 }
 
@@ -830,7 +903,7 @@ async function loadPeople() {
     const d = await api("people", { params: { q: $("#people-q")?.value || "", role: $("#people-role")?.value || "" } });
     const box = $("#people-list"); if (!box) return;
     if (!d.success) { box.innerHTML = `<p class="text-red-600 text-sm">${esc(d.message)}</p>`; return; }
-    box.innerHTML = d.people.length ? `<div class="space-y-3">${d.people.map(x => personCard(x, connButton(x.id, x.connection, x.role))).join("")}</div>` : `<div class="card p-8 text-center text-gray-500 text-sm">Aucun résultat.</div>`;
+    box.innerHTML = d.people.length ? `<div class="space-y-3">${d.people.map(x => personCard(x, memberCardActions(x))).join("")}</div>` : `<div class="card p-8 text-center text-gray-500 text-sm">Aucun résultat.</div>`;
 }
 
 async function vInvitations() {
@@ -1009,7 +1082,7 @@ async function loadConversations(openTargetId = 0) {
     const list = $("#conv-list");
     if (!list) return;
 
-    // Charger les conversations et les relations en parallèle
+    // Charger les conversations et les relations
     const [dConv, dConn] = await Promise.all([api("conversations"), api("connections")]);
 
     if (!dConv.success) {
@@ -1041,13 +1114,12 @@ async function loadConversations(openTargetId = 0) {
             await openChat(0, byFriend.user_id);
             return;
         }
-        // Tenter d'ouvrir avec cet user_id
+        // Démarrer une nouvelle discussion avec cet utilisateur
         await openChat(0, openTargetId);
     } else if (convCache.length > 0 && window.innerWidth >= 768) {
         // Sur desktop, ouvrir la première conversation
         await openChat(convCache[0].conversation_id, convCache[0].other_id);
     } else if (friendsCache.length > 0 && window.innerWidth >= 768) {
-        // Si aucune conversation mais des contacts acceptés, ouvrir avec le premier contact
         await openChat(0, friendsCache[0].user_id);
     }
 }
@@ -1066,7 +1138,10 @@ function renderConvList() {
                 ${avatar(c.other_id, c.other_name, c.has_avatar, "md")}
                 <div class="flex-1 min-w-0">
                     <div class="flex items-center justify-between gap-1">
-                        <span class="font-semibold text-sm text-gray-900 truncate">${esc(c.other_name)}</span>
+                        <span class="font-semibold text-sm text-gray-900 truncate flex items-center gap-1">
+                            ${esc(c.other_name)}
+                            ${c.is_blocked ? `<i class="fa-solid fa-ban text-[10px] text-red-500" title="Bloqué"></i>` : ""}
+                        </span>
                         <span class="text-[10px] text-gray-400 shrink-0">${c.last_message_at ? fmtDate(c.last_message_at) : ""}</span>
                     </div>
                     <div class="flex items-center justify-between gap-1 mt-0.5">
@@ -1078,7 +1153,7 @@ function renderConvList() {
         `).join("");
     }
 
-    // 2. Contacts acceptés avec qui aucune conversation n'a encore été démarrée
+    // 2. Contacts suggérés avec qui aucune conversation n'a encore été démarrée
     const convOtherIds = convCache.map(c => c.other_id);
     const newContacts = friendsCache.filter(f => !convOtherIds.includes(f.user_id));
 
@@ -1104,8 +1179,8 @@ function renderConvList() {
     if (!convCache.length && !newContacts.length) {
         html = `
             <div class="p-6 text-center space-y-3 text-gray-500">
-                <i class="fa-solid fa-user-group text-3xl text-gray-300"></i>
-                <p class="text-xs">Vous n'avez pas encore de relation acceptée.<br>Connectez-vous avec des étudiants ou des entreprises pour échanger des messages privés.</p>
+                <i class="fa-solid fa-comments text-3xl text-gray-300"></i>
+                <p class="text-xs">Vous n'avez pas encore de discussion.<br>Vous pouvez écrire à n'importe quel membre depuis son profil, la liste des membres ou ses publications.</p>
                 <a href="#/people" class="btn btn-primary !py-1.5 !px-3 text-xs inline-flex"><i class="fa-solid fa-user-plus mr-1"></i>Trouver des contacts</a>
             </div>
         `;
@@ -1144,7 +1219,6 @@ async function openChat(convId, otherId) {
         if (msgBox) msgBox.innerHTML = `
             <div class="p-6 text-center space-y-2">
                 <div class="text-red-600 text-sm font-semibold">${esc(d.message)}</div>
-                <p class="text-xs text-gray-400">Pour échanger des messages, vous devez être en relation acceptée.</p>
             </div>
         `;
         if (form) form.classList.add("hidden");
@@ -1153,6 +1227,7 @@ async function openChat(convId, otherId) {
 
     activeChatConv = d.conversation_id;
     activeChatOtherId = d.other.id;
+    const isBlocked = !!d.other.is_blocked;
 
     if (header) {
         header.innerHTML = `
@@ -1169,12 +1244,31 @@ async function openChat(convId, otherId) {
                     <p class="text-[11px] text-gray-400">${roleChip(d.other.role)}</p>
                 </div>
             </div>
-            <a href="#/profile/${d.other.id}" class="btn btn-ghost !py-1 !px-2.5 text-xs text-indigo-600">Voir profil</a>
+            <div class="flex items-center gap-1 shrink-0">
+                <button type="button" data-act="toggle-block" data-uid="${d.other.id}" class="btn btn-ghost !py-1 !px-2 text-xs ${isBlocked ? "text-amber-700 bg-amber-50 border border-amber-200" : "text-gray-500 hover:text-red-600"}" title="${isBlocked ? "Débloquer cet utilisateur" : "Bloquer cet utilisateur"}">
+                    <i class="fa-solid fa-ban mr-1"></i><span>${isBlocked ? "Débloquer" : "Bloquer"}</span>
+                </button>
+                <button type="button" data-act="report-item" data-type="user" data-id="${d.other.id}" class="btn btn-ghost !py-1 !px-2 text-xs text-gray-400 hover:text-amber-600" title="Signaler"><i class="fa-solid fa-flag"></i></button>
+                <a href="#/profile/${d.other.id}" class="btn btn-ghost !py-1 !px-2.5 text-xs text-indigo-600 hidden sm:inline-flex">Profil</a>
+            </div>
         `;
     }
 
-    if (form) form.classList.remove("hidden");
+    if (isBlocked) {
+        if (form) form.classList.add("hidden");
+    } else {
+        if (form) form.classList.remove("hidden");
+    }
+
     renderMessagesList(d.messages);
+    if (isBlocked) {
+        msgBox?.insertAdjacentHTML("beforeend", `
+            <div class="p-3 my-2 text-center text-xs bg-amber-50 text-amber-800 rounded-xl border border-amber-200">
+                <i class="fa-solid fa-lock mr-1"></i> Vous avez bloqué cet utilisateur. Débloquez-le pour pouvoir lui envoyer des messages.
+            </div>
+        `);
+    }
+
     $("#chat-input")?.focus();
 
     if (d.messages && d.messages.length) {
@@ -1312,6 +1406,57 @@ async function onChatSend(form) {
     }
 }
 
+function openReportModal(targetType, targetId) {
+    const existing = $("#report-modal");
+    if (existing) existing.remove();
+
+    const labels = {
+        user: "cet utilisateur",
+        post: "cette publication",
+        comment: "ce commentaire",
+        message: "ce message",
+    };
+    const titleTarget = labels[targetType] || "cet élément";
+
+    const modal = document.createElement("div");
+    modal.id = "report-modal";
+    modal.className = "fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4 backdrop-blur-sm";
+    modal.innerHTML = `
+        <div class="bg-white rounded-2xl max-w-md w-full p-5 space-y-4 shadow-2xl relative">
+            <div class="flex items-center justify-between border-b pb-3">
+                <h3 class="font-bold text-gray-900 text-base flex items-center gap-2">
+                    <i class="fa-solid fa-flag text-amber-500"></i> Signaler ${titleTarget}
+                </h3>
+                <button type="button" data-act="close-report-modal" class="text-gray-400 hover:text-gray-600 text-lg" aria-label="Fermer"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <form data-form="submit-report" class="space-y-3">
+                <input type="hidden" name="target_type" value="${esc(targetType)}">
+                <input type="hidden" name="target_id" value="${targetId}">
+                <div>
+                    <label class="block text-xs font-semibold text-gray-700 mb-1" for="report-reason">Motif du signalement *</label>
+                    <select id="report-reason" name="reason" class="field" required>
+                        <option value="">Sélectionnez un motif</option>
+                        <option value="spam">Spam ou publicité abusive</option>
+                        <option value="harassment">Harcèlement ou propos injurieux</option>
+                        <option value="inappropriate">Contenu inapproprié ou offensant</option>
+                        <option value="scam">Arnaque ou usurpation</option>
+                        <option value="other">Autre motif</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-xs font-semibold text-gray-700 mb-1" for="report-details">Précisions (facultatif)</label>
+                    <textarea id="report-details" name="details" rows="3" maxlength="1000" class="field text-xs" placeholder="Décrivez brièvement le problème…"></textarea>
+                </div>
+                <div class="flex justify-end gap-2 pt-2 border-t">
+                    <button type="button" data-act="close-report-modal" class="btn btn-ghost !py-1.5 !px-3 text-xs">Annuler</button>
+                    <button type="submit" class="btn btn-primary !py-1.5 !px-4 text-xs">Envoyer le signalement</button>
+                </div>
+            </form>
+        </div>
+    `;
+    document.body.appendChild(modal);
+}
+
 // ------------------------------------------------------------------ gestionnaires d'événements (délégation)
 document.addEventListener("click", async (e) => {
     const pw = e.target.closest("[data-toggle-pw]");
@@ -1378,11 +1523,31 @@ document.addEventListener("click", async (e) => {
             if (rep) {
                 const isHidden = rep.classList.toggle("hidden");
                 const span = $("span", el);
-                const count = rep.children.length;
+                const count = rep.querySelectorAll("[data-comment-item]").length;
                 if (span) span.textContent = isHidden ? `Afficher les réponses (${count})` : "Masquer les réponses";
                 const ic = $("i", el);
                 if (ic) ic.className = isHidden ? "fa-solid fa-chevron-down text-[10px]" : "fa-solid fa-chevron-up text-[10px]";
             }
+            break;
+        }
+        case "toggle-block": {
+            const uid = +el.dataset.uid;
+            const d = await api("user_block", { method: "POST", body: { user_id: uid } });
+            if (!d.success) return toast(d.message, "error");
+            toast(d.message);
+            if (activeChatConv && activeChatOtherId === uid) {
+                await openChat(activeChatConv, uid);
+            } else {
+                route();
+            }
+            break;
+        }
+        case "report-item": {
+            openReportModal(el.dataset.type, +el.dataset.id);
+            break;
+        }
+        case "close-report-modal": {
+            $("#report-modal")?.remove();
             break;
         }
         case "comment-react": {
@@ -1454,8 +1619,27 @@ document.addEventListener("submit", async (e) => {
         setBusy(btn, false);
         if (!d.success) return toast(d.message, "error");
         await renderComments(postId);
-        const rep = $(`#replies-${parentId}`);
+        const rep = $(`#replies-${parentId}`) || form.closest("[id^=replies-]");
         if (rep) rep.classList.remove("hidden");
+        if (d.id) {
+            document.querySelectorAll(`[data-post="${postId}"] [id^="replies-"]`).forEach(container => {
+                if (container.querySelector(`[data-comment-item="${d.id}"]`)) container.classList.remove("hidden");
+            });
+        }
+        return;
+    }
+    if (name === "submit-report") {
+        const reason = form.querySelector('[name="reason"]')?.value || "";
+        const details = form.querySelector('[name="details"]')?.value.trim() || "";
+        const targetType = form.querySelector('[name="target_type"]')?.value || "user";
+        const targetId = +form.querySelector('[name="target_id"]')?.value || 0;
+        if (!reason) return toast("Veuillez sélectionner un motif.", "error");
+        setBusy(btn, true, "Envoi…");
+        const d = await api("report", { method: "POST", body: { target_type: targetType, target_id: targetId, reason, details } });
+        setBusy(btn, false);
+        if (!d.success) return toast(d.message, "error");
+        toast(d.message);
+        $("#report-modal")?.remove();
         return;
     }
     if (name === "chat-send") {
